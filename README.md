@@ -35,7 +35,7 @@ $cred = Get-Credential
 The script checks:
 
 - **Host health** — connection state, NTP, syslog, uptime, datastore connectivity
-- **VM compliance** — VMware Tools, VM hardware version, mounted ISOs/CD-ROMs, snapshot age
+- **VM compliance** — VMware Tools, OS system drive free space (`C:\` / `/`), VM hardware version, mounted ISOs/CD-ROMs, snapshot age
 - **Capacity** — datastore free space, cluster CPU/RAM utilization
 - **Cluster config** — HA, admission control, DRS, EVC
 

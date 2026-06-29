@@ -33,6 +33,10 @@
 .PARAMETER ClusterUsageWarnPercent
     Cluster CPU/RAM usage above this % is WARN. Default 80.
 
+.PARAMETER OSDriveFreeWarnGB
+    Guest OS system drive (C:\ on Windows, / on Linux) with less than this many GB
+    free is flagged. Requires VMware Tools running in the guest. Default 20.
+
 .EXAMPLE
     .\Invoke-VMwareHealthCheck.ps1 -VCenter vcenter01.corp.local
 
@@ -56,7 +60,8 @@ param(
     [int] $SnapshotAgeWarningDays   = 3,
     [int] $DatastoreFreeWarnPercent = 20,
     [int] $DatastoreFreeCritPercent = 10,
-    [int] $ClusterUsageWarnPercent  = 80
+    [int] $ClusterUsageWarnPercent  = 80,
+    [int] $OSDriveFreeWarnGB        = 20
 )
 
 #region --- Setup -------------------------------------------------------------
@@ -177,6 +182,25 @@ try {
                 'toolsNotRunning'{ Add-Result 'VMCompliance' $vm.Name 'VMwareTools' 'WARN' 'Tools not running' }
                 'toolsNotInstalled'{ Add-Result 'VMCompliance' $vm.Name 'VMwareTools' 'FAIL' 'Tools not installed' }
                 default          { Add-Result 'VMCompliance' $vm.Name 'VMwareTools' 'INFO' "$toolsStatus" }
+            }
+
+            # OS system drive free space (C:\ on Windows, / on Linux).
+            # Guest disk data is only populated when VMware Tools is running.
+            $guestDisks = $vm.ExtensionData.Guest.Disk
+            if ($guestDisks) {
+                $osDrive = $guestDisks | Where-Object { $_.DiskPath -eq 'C:\' -or $_.DiskPath -eq '/' } | Select-Object -First 1
+                if ($osDrive) {
+                    $freeGB  = [math]::Round($osDrive.FreeSpace / 1GB, 1)
+                    $totalGB = [math]::Round($osDrive.Capacity / 1GB, 1)
+                    $detail  = "$($osDrive.DiskPath) ${freeGB}GB free of ${totalGB}GB"
+                    if ($freeGB -lt $OSDriveFreeWarnGB) {
+                        Add-Result 'VMCompliance' $vm.Name 'OSDriveFree' 'WARN' "$detail (< ${OSDriveFreeWarnGB}GB)"
+                    } else {
+                        Add-Result 'VMCompliance' $vm.Name 'OSDriveFree' 'PASS' $detail
+                    }
+                } else {
+                    Add-Result 'VMCompliance' $vm.Name 'OSDriveFree' 'INFO' 'No C:\ or / drive reported by Tools'
+                }
             }
         }
 
