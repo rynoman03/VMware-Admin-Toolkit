@@ -1,0 +1,23 @@
+# Generated reports
+VMwareHealthCheck-*.html
+VMwareHealthCheck-*.csv
+*.html
+*.csv
+
+# Credentials / secrets — never commit these
+*.cred
+*.credstore
+*.xml.cred
+credstore*
+*.secret
+*.key
+
+# PowerShell / editor noise
+*.log
+.vscode/
+.idea/
+
+# OS cruft
+Thumbs.db
+Desktop.ini
+.DS_Store
