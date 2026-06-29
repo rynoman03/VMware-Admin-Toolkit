@@ -1,4 +1,4 @@
-# vmware-admin-toolkit
+# VMware-Admin-Toolkit
 
 A collection of PowerCLI scripts for automating routine VMware vSphere administration.
 Everything here is built to be safe, parameterized, and report-driven.
