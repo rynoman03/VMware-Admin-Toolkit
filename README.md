@@ -8,6 +8,7 @@ Everything here is built to be safe, parameterized, and report-driven.
 | Script | Purpose | Read-only? |
 |--------|---------|------------|
 | [`HealthCheck/Invoke-VMwareHealthCheck.ps1`](HealthCheck/Invoke-VMwareHealthCheck.ps1) | Health & compliance report across host health, VM compliance, capacity, and cluster config. Emits color-coded console output plus HTML and CSV reports. | ✅ Yes |
+| [`UpdateCompliance/Invoke-VMwareUpdateCompliance.ps1`](UpdateCompliance/Invoke-VMwareUpdateCompliance.ps1) | Report VMs whose VMware Tools or VM hardware version need updating. Optional opt-in remediation (`-UpdateTools` / `-UpgradeHardware`) guarded by `-WhatIf`/`-Confirm`. | ✅ Report by default |
 
 ## Requirements
 
@@ -40,6 +41,23 @@ The script checks:
 - **Cluster config** — HA, admission control, DRS, EVC
 
 Findings are tagged `PASS` / `WARN` / `FAIL` / `INFO`. The script never modifies configuration.
+
+### Update Compliance (VMware Tools & Hardware Version)
+
+```powershell
+# Report only — which VMs need Tools or hardware-version updates (target vmx-19)
+.\UpdateCompliance\Invoke-VMwareUpdateCompliance.ps1 -VCenter vcenter01.corp.local
+
+# Preview hardware upgrades to vmx-20 without changing anything
+.\UpdateCompliance\Invoke-VMwareUpdateCompliance.ps1 -VCenter vc1 -TargetHardwareVersion 20 -UpgradeHardware -WhatIf
+
+# Update VMware Tools on flagged powered-on VMs, without rebooting the guest
+.\UpdateCompliance\Invoke-VMwareUpdateCompliance.ps1 -VCenter vc1 -UpdateTools -NoReboot
+```
+
+- **Report-only by default.** Remediation is opt-in via `-UpdateTools` / `-UpgradeHardware`.
+- Hardware upgrades only run on **powered-off** VMs — powered-on VMs are skipped, never forced off.
+- Both remediation paths support `-WhatIf` and `-Confirm`. Always run with `-WhatIf` first.
 
 ## Conventions
 
