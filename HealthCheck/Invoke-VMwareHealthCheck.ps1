@@ -37,6 +37,10 @@
     Guest OS system drive (C:\ on Windows, / on Linux) with less than this many GB
     free is flagged. Requires VMware Tools running in the guest. Default 20.
 
+.PARAMETER DataDriveFreeWarnGB
+    Any other guest drive (non-OS volume) with less than this many GB free is
+    flagged. Requires VMware Tools running in the guest. Default 10.
+
 .EXAMPLE
     .\Invoke-VMwareHealthCheck.ps1 -VCenter vcenter01.corp.local
 
@@ -61,7 +65,8 @@ param(
     [int] $DatastoreFreeWarnPercent = 20,
     [int] $DatastoreFreeCritPercent = 10,
     [int] $ClusterUsageWarnPercent  = 80,
-    [int] $OSDriveFreeWarnGB        = 20
+    [int] $OSDriveFreeWarnGB        = 20,
+    [int] $DataDriveFreeWarnGB      = 10
 )
 
 #region --- Setup -------------------------------------------------------------
@@ -200,6 +205,19 @@ try {
                     }
                 } else {
                     Add-Result 'VMCompliance' $vm.Name 'OSDriveFree' 'INFO' 'No C:\ or / drive reported by Tools'
+                }
+
+                # All other guest drives (data/secondary volumes) below threshold.
+                $osPath = if ($osDrive) { $osDrive.DiskPath } else { $null }
+                foreach ($disk in ($guestDisks | Where-Object { $_.DiskPath -ne $osPath })) {
+                    $freeGB  = [math]::Round($disk.FreeSpace / 1GB, 1)
+                    $totalGB = [math]::Round($disk.Capacity / 1GB, 1)
+                    $detail  = "$($disk.DiskPath) ${freeGB}GB free of ${totalGB}GB"
+                    if ($freeGB -lt $DataDriveFreeWarnGB) {
+                        Add-Result 'VMCompliance' $vm.Name 'DataDriveFree' 'WARN' "$detail (< ${DataDriveFreeWarnGB}GB)"
+                    } else {
+                        Add-Result 'VMCompliance' $vm.Name 'DataDriveFree' 'PASS' $detail
+                    }
                 }
             }
         }
