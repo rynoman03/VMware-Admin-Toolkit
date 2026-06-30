@@ -318,8 +318,6 @@ finally {
 </style>
 "@
 
-    Add-Type -AssemblyName System.Web
-
     # Per-status counts for the filter buttons. @() guards the PowerShell
     # quirk where a single matching object has no usable .Count.
     $cFail = @($script:Results | Where-Object { $_.Status -eq 'FAIL' }).Count
@@ -371,8 +369,8 @@ finally {
     # Category and Check live in the heading)
     $bodyHtml = foreach ($sec in $sections) {
         $secRows = ($sec.Rows | ForEach-Object {
-            "<tr data-status='$($_.Status)'><td>$([System.Web.HttpUtility]::HtmlEncode($_.Object))</td>" +
-            "<td class='$($_.Status)'>$($_.Status)</td><td>$([System.Web.HttpUtility]::HtmlEncode($_.Detail))</td></tr>"
+            "<tr data-status='$($_.Status)'><td>$([System.Net.WebUtility]::HtmlEncode([string]$_.Object))</td>" +
+            "<td class='$($_.Status)'>$($_.Status)</td><td>$([System.Net.WebUtility]::HtmlEncode([string]$_.Detail))</td></tr>"
         }) -join "`n"
         @"
 <h2 id="$($sec.Id)" data-section="$($sec.Id)">$($sec.Cat) &rsaquo; $($sec.Check) <span class="seccount">($($sec.Rows.Count))</span> <a class="backtop" href="#top">&uarr; top</a></h2>
