@@ -451,7 +451,9 @@ finally {
     $cInfo = @($script:Results | Where-Object { $_.Status -eq 'INFO' }).Count
     $cPass = @($script:Results | Where-Object { $_.Status -eq 'PASS' }).Count
     $cAttn = $cFail + $cWarn
-    $cAll  = @($script:Results).Count
+    # $script:Results is a List[object]; read .Count directly. Wrapping it as
+    # @($script:Results).Count throws "Argument types do not match" in WinPS 5.1.
+    $cAll  = $script:Results.Count
 
     # Clickable, color-coded summary tokens (e.g. FAIL=57) wired to the same filter
     $summaryHtml = (($script:Results | Group-Object Status | ForEach-Object {
