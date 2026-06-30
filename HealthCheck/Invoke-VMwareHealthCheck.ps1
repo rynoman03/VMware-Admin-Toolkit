@@ -405,6 +405,7 @@ finally {
  .filters button.active { background: #2d3e50; color: #fff; border-color: #2d3e50; }
  tr.hidden { display: none; }
  #emptyNote { color: #57606a; font-style: italic; margin: 12px 0; display: none; }
+ .sumlink { cursor: pointer; text-decoration: underline; }
 </style>
 "@
 
@@ -422,13 +423,18 @@ finally {
     $cAttn = $cFail + $cWarn
     $cAll  = @($script:Results).Count
 
+    # Clickable, color-coded summary tokens (e.g. FAIL=57) wired to the same filter
+    $summaryHtml = (($script:Results | Group-Object Status | ForEach-Object {
+        "<span class='sumlink $($_.Name)' data-filter='$($_.Name)'>$($_.Name)=$($_.Count)</span>"
+    }) -join ' &nbsp; ')
+
     Add-Type -AssemblyName System.Web
     $html = @"
 <!DOCTYPE html><html><head><meta charset='utf-8'>$style
 <title>VMware Health Check $stamp</title></head><body>
 <h1>VMware Health &amp; Compliance Report</h1>
 <p>Generated: $(Get-Date)<br>vCenter(s): $($VCenter -join ', ')<br>
-Summary: $($summary -join ' &nbsp; ')</p>
+Summary: $summaryHtml &nbsp; <span style='color:#57606a'>(click a number or button to filter)</span></p>
 <div class="filters">
  <button data-filter="attention" class="active">Needs attention &mdash; FAIL + WARN ($cAttn)</button>
  <button data-filter="FAIL">FAIL ($cFail)</button>
@@ -458,6 +464,7 @@ $rowsHtml
   note.style.display = visible ? 'none' : 'block';
  }
  buttons.forEach(function(b){ b.addEventListener('click', function(){ apply(b.getAttribute('data-filter')); }); });
+ document.querySelectorAll('.sumlink').forEach(function(s){ s.addEventListener('click', function(){ apply(s.getAttribute('data-filter')); }); });
  apply('attention');
 })();
 </script>
