@@ -56,7 +56,8 @@
     .\Invoke-VMwareUpdateCompliance.ps1 -VCenter vc1 -UpdateTools -NoReboot
 
 .NOTES
-    Requires VMware.PowerCLI. Install with:  Install-Module VMware.PowerCLI -Scope CurrentUser
+    Requires PowerCLI. Install with:  Install-Module VCF.PowerCLI -Scope CurrentUser
+    (older releases use the VMware.PowerCLI module name; both are supported)
     Tools/HW data requires the VM to have run at least once; Tools status is
     only meaningful for powered-on VMs.
 #>
@@ -110,10 +111,18 @@ $targetHwNum = 0
 if ($TargetHardwareVersion -match '(\d+)') { $targetHwNum = [int]$Matches[1] }
 if ($targetHwNum -le 0) { throw "Invalid -TargetHardwareVersion '$TargetHardwareVersion'. Use a number like 19 or vmx-19." }
 
-if (-not (Get-Module -ListAvailable -Name VMware.PowerCLI)) {
-    throw "VMware.PowerCLI is not installed. Run: Install-Module VMware.PowerCLI -Scope CurrentUser"
+# Broadcom renamed the meta-module from VMware.PowerCLI to VCF.PowerCLI
+# in PowerCLI 13.x, so accept either.
+$pcliModule = @('VCF.PowerCLI','VMware.PowerCLI') |
+    Where-Object { Get-Module -ListAvailable -Name $_ } |
+    Select-Object -First 1
+if (-not $pcliModule) {
+    $hint = if ($PSVersionTable.PSEdition -eq 'Desktop') {
+        " You're running Windows PowerShell 5.1 (Desktop). If you installed PowerCLI under PowerShell 7, relaunch with: pwsh -File <script>"
+    } else { "" }
+    throw "PowerCLI (VCF.PowerCLI or VMware.PowerCLI) is not installed for this PowerShell edition ($($PSVersionTable.PSEdition)).$hint Run: Install-Module VCF.PowerCLI -Scope CurrentUser"
 }
-Import-Module VMware.PowerCLI -ErrorAction Stop | Out-Null
+Import-Module $pcliModule -ErrorAction Stop | Out-Null
 Set-PowerCLIConfiguration -Scope Session -InvalidCertificateAction Ignore -ParticipateInCeip $false -Confirm:$false | Out-Null
 
 #endregion

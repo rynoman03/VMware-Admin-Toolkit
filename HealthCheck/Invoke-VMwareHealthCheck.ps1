@@ -49,7 +49,8 @@
     .\Invoke-VMwareHealthCheck.ps1 -VCenter vc1,vc2 -Credential $cred -ReportPath C:\Reports
 
 .NOTES
-    Requires VMware.PowerCLI. Install with:  Install-Module VMware.PowerCLI -Scope CurrentUser
+    Requires PowerCLI. Install with:  Install-Module VCF.PowerCLI -Scope CurrentUser
+    (older releases use the VMware.PowerCLI module name; both are supported)
 #>
 
 [CmdletBinding()]
@@ -98,14 +99,18 @@ function Add-Result {
     Write-Host ("[{0,-4}] {1,-12} {2,-28} {3} - {4}" -f $Status, $Category, $Object, $Check, $Detail) -ForegroundColor $color
 }
 
-# Ensure PowerCLI is present
-if (-not (Get-Module -ListAvailable -Name VMware.PowerCLI)) {
+# Ensure PowerCLI is present. Broadcom renamed the meta-module from
+# VMware.PowerCLI to VCF.PowerCLI in PowerCLI 13.x, so accept either.
+$pcliModule = @('VCF.PowerCLI','VMware.PowerCLI') |
+    Where-Object { Get-Module -ListAvailable -Name $_ } |
+    Select-Object -First 1
+if (-not $pcliModule) {
     $hint = if ($PSVersionTable.PSEdition -eq 'Desktop') {
         " You're running Windows PowerShell 5.1 (Desktop). If you installed PowerCLI under PowerShell 7, relaunch with: pwsh -File <script>"
     } else { "" }
-    throw "VMware.PowerCLI is not installed for this PowerShell edition ($($PSVersionTable.PSEdition)).$hint Run: Install-Module VMware.PowerCLI -Scope CurrentUser"
+    throw "PowerCLI (VCF.PowerCLI or VMware.PowerCLI) is not installed for this PowerShell edition ($($PSVersionTable.PSEdition)).$hint Run: Install-Module VCF.PowerCLI -Scope CurrentUser"
 }
-Import-Module VMware.PowerCLI -ErrorAction Stop | Out-Null
+Import-Module $pcliModule -ErrorAction Stop | Out-Null
 
 # Don't prompt about the CEIP / invalid certs interactively during an unattended run
 Set-PowerCLIConfiguration -Scope Session -InvalidCertificateAction Ignore -ParticipateInCeip $false -Confirm:$false | Out-Null

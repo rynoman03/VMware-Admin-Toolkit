@@ -13,10 +13,11 @@ Everything here is built to be safe, parameterized, and report-driven.
 ## Requirements
 
 - **PowerShell** 5.1+ or PowerShell 7+
-- **VMware.PowerCLI** module:
+- **PowerCLI** module (Broadcom renamed it from `VMware.PowerCLI` to `VCF.PowerCLI` in 13.x; the scripts accept either):
   ```powershell
-  Install-Module VMware.PowerCLI -Scope CurrentUser
+  Install-Module VCF.PowerCLI -Scope CurrentUser
   ```
+  > Install into the **same PowerShell edition** you run the scripts with — PS7 (`pwsh`) and Windows PowerShell 5.1 use separate module paths.
 - Network access and read credentials to your vCenter Server(s).
 
 ## Usage
