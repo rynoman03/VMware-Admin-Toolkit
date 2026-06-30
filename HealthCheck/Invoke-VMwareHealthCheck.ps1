@@ -100,7 +100,10 @@ function Add-Result {
 
 # Ensure PowerCLI is present
 if (-not (Get-Module -ListAvailable -Name VMware.PowerCLI)) {
-    throw "VMware.PowerCLI is not installed. Run: Install-Module VMware.PowerCLI -Scope CurrentUser"
+    $hint = if ($PSVersionTable.PSEdition -eq 'Desktop') {
+        " You're running Windows PowerShell 5.1 (Desktop). If you installed PowerCLI under PowerShell 7, relaunch with: pwsh -File <script>"
+    } else { "" }
+    throw "VMware.PowerCLI is not installed for this PowerShell edition ($($PSVersionTable.PSEdition)).$hint Run: Install-Module VMware.PowerCLI -Scope CurrentUser"
 }
 Import-Module VMware.PowerCLI -ErrorAction Stop | Out-Null
 
