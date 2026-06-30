@@ -77,6 +77,8 @@ Both carry the columns **Category, Object, Check, Status, Detail**, and are writ
 - Hardware upgrades only run on **powered-off** VMs — powered-on VMs are skipped, never forced off.
 - Both remediation paths support `-WhatIf` and `-Confirm`. Always run with `-WhatIf` first.
 
+**Output.** Like the health check, results are written to two timestamped files in `-ReportPath` (**defaults to the current directory**): `VMwareUpdateCompliance-<yyyyMMdd-HHmmss>.html` and `.csv`, both with the columns **Category, Object, Check, Status, Detail**, produced in a `finally` block even if the run errors. Pass `-ReportPath C:\Reports` to fix the location.
+
 ## Conventions
 
 - Scripts are **read-only by default**; any script that changes state will say so clearly and support `-WhatIf` where practical.

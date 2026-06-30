@@ -68,6 +68,14 @@
       500+ VMs ....... 10+ minutes
     Add ~10-30s for the initial PowerCLI module import. Multiple vCenters
     add their inventories together.
+
+    Output: every result shown on the console is also written to two
+    timestamped files in -ReportPath (default: current directory):
+      VMwareUpdateCompliance-<yyyyMMdd-HHmmss>.html  (styled table)
+      VMwareUpdateCompliance-<yyyyMMdd-HHmmss>.csv   (same rows, for Excel)
+    Both share the columns Category, Object, Check, Status, Detail, and
+    are written in a finally block so they are produced even if the run
+    errors partway through. Pass -ReportPath to control where they land.
 #>
 
 [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High')]
