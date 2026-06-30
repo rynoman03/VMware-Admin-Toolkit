@@ -5,7 +5,7 @@
 .DESCRIPTION
     Connects to one or more vCenter Servers and evaluates four areas:
         1. Host health     - connection state, NTP, syslog, uptime, datastore connectivity
-        2. VM compliance   - VMware Tools, VM hardware version, mounted ISOs, snapshot age
+        2. VM compliance   - VMware Tools, VM hardware version, mounted ISOs, floppy drives, snapshot age
         3. Capacity        - datastore free space, cluster CPU/RAM utilization
         4. Cluster config  - HA / DRS / admission control
 
@@ -203,13 +203,15 @@ try {
     Write-Host "`n=== VM Compliance ===" -ForegroundColor Cyan
     $vms = Get-VM
 
-    # Pre-fetch snapshots and CD drives for ALL VMs in one round-trip each,
-    # rather than calling Get-Snapshot / Get-CDDrive once per VM inside the
-    # loop. On large or multi-vCenter inventories this is the single biggest
-    # speed-up. Key by .Uid (server-qualified) so VMs from different vCenters
-    # with the same internal MoRef Id don't collide.
-    $snapsByVm = @{}
-    $cdByVm    = @{}
+    # Pre-fetch snapshots, CD drives and floppy drives for ALL VMs in one
+    # round-trip each, rather than calling Get-Snapshot / Get-CDDrive /
+    # Get-FloppyDrive once per VM inside the loop. On large or multi-vCenter
+    # inventories this is the single biggest speed-up. Key by .Uid
+    # (server-qualified) so VMs from different vCenters with the same internal
+    # MoRef Id don't collide.
+    $snapsByVm  = @{}
+    $cdByVm     = @{}
+    $floppyByVm = @{}
     if ($vms) {
         Write-Host "  Pre-fetching snapshots and media for $($vms.Count) VM(s)..." -ForegroundColor DarkGray
         foreach ($s in (Get-Snapshot -VM $vms)) {
@@ -221,6 +223,11 @@ try {
             $key = $c.Parent.Uid
             if (-not $cdByVm.ContainsKey($key)) { $cdByVm[$key] = [System.Collections.Generic.List[object]]::new() }
             $cdByVm[$key].Add($c)
+        }
+        foreach ($fd in (Get-FloppyDrive -VM $vms)) {
+            $key = $fd.Parent.Uid
+            if (-not $floppyByVm.ContainsKey($key)) { $floppyByVm[$key] = [System.Collections.Generic.List[object]]::new() }
+            $floppyByVm[$key].Add($fd)
         }
     }
 
@@ -284,6 +291,19 @@ try {
         if ($mounted) {
             $what = ($mounted | ForEach-Object { if ($_.IsoPath) { $_.IsoPath } else { 'host/remote device' } }) -join ','
             Add-Result 'VMCompliance' $vm.Name 'MountedMedia' 'WARN' "Connected media: $what"
+        }
+
+        # Floppy drives - legacy hardware. A connected floppy blocks vMotion;
+        # any floppy at all is usually unnecessary on a modern VM.
+        $floppies = $floppyByVm[$vm.Uid]
+        if ($floppies) {
+            $connected = $floppies | Where-Object { $_.ConnectionState.Connected -or $_.ConnectionState.StartConnected }
+            if ($connected) {
+                $what = ($connected | ForEach-Object { if ($_.FloppyImagePath) { $_.FloppyImagePath } else { 'device' } }) -join ','
+                Add-Result 'VMCompliance' $vm.Name 'FloppyDrive' 'WARN' "Connected floppy drive ($what) - disconnect/remove (legacy, blocks vMotion)"
+            } else {
+                Add-Result 'VMCompliance' $vm.Name 'FloppyDrive' 'INFO' "Floppy drive present but disconnected - consider removing (legacy device)"
+            }
         }
 
         # Snapshot age
