@@ -61,6 +61,14 @@
     Add ~10-30s for the initial PowerCLI module import. Multiple vCenters
     add their inventories together. As long as [PASS]/[WARN] lines keep
     printing it is working, not hung.
+
+    Output: every result shown on the console is also written to two
+    timestamped files in -ReportPath (default: current directory):
+      VMwareHealthCheck-<yyyyMMdd-HHmmss>.html  (styled table)
+      VMwareHealthCheck-<yyyyMMdd-HHmmss>.csv   (same rows, for Excel)
+    Both share the columns Category, Object, Check, Status, Detail, and
+    are written in a finally block so they are produced even if the run
+    errors partway through. Pass -ReportPath to control where they land.
 #>
 
 [CmdletBinding()]

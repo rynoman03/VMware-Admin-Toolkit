@@ -53,6 +53,13 @@ Findings are tagged `PASS` / `WARN` / `FAIL` / `INFO`. The script never modifies
 
 Add ~10-30s for the initial PowerCLI module import. As long as `PASS`/`WARN` lines keep printing, it's working — not hung.
 
+**Output.** Everything printed to the console is also written to two timestamped files in `-ReportPath` (**defaults to the current directory** if not specified):
+
+- `VMwareHealthCheck-<yyyyMMdd-HHmmss>.html` — styled, color-coded table
+- `VMwareHealthCheck-<yyyyMMdd-HHmmss>.csv` — same rows, for Excel / trending
+
+Both carry the columns **Category, Object, Check, Status, Detail**, and are written in a `finally` block — so you still get a report even if the run errors partway through. Pass `-ReportPath C:\Reports` to keep output in a fixed location instead of wherever you launched from.
+
 ### Update Compliance (VMware Tools & Hardware Version)
 
 ```powershell
