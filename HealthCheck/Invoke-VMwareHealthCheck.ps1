@@ -195,6 +195,27 @@ try {
     Write-Host "`n=== VM Compliance ===" -ForegroundColor Cyan
     $vms = Get-VM
 
+    # Pre-fetch snapshots and CD drives for ALL VMs in one round-trip each,
+    # rather than calling Get-Snapshot / Get-CDDrive once per VM inside the
+    # loop. On large or multi-vCenter inventories this is the single biggest
+    # speed-up. Key by .Uid (server-qualified) so VMs from different vCenters
+    # with the same internal MoRef Id don't collide.
+    $snapsByVm = @{}
+    $cdByVm    = @{}
+    if ($vms) {
+        Write-Host "  Pre-fetching snapshots and media for $($vms.Count) VM(s)..." -ForegroundColor DarkGray
+        foreach ($s in (Get-Snapshot -VM $vms)) {
+            $key = $s.VM.Uid
+            if (-not $snapsByVm.ContainsKey($key)) { $snapsByVm[$key] = [System.Collections.Generic.List[object]]::new() }
+            $snapsByVm[$key].Add($s)
+        }
+        foreach ($c in (Get-CDDrive -VM $vms)) {
+            $key = $c.Parent.Uid
+            if (-not $cdByVm.ContainsKey($key)) { $cdByVm[$key] = [System.Collections.Generic.List[object]]::new() }
+            $cdByVm[$key].Add($c)
+        }
+    }
+
     foreach ($vm in $vms) {
         # VMware Tools status (only meaningful when powered on)
         if ($vm.PowerState -eq 'PoweredOn') {
@@ -251,14 +272,14 @@ try {
         }
 
         # Mounted ISO / connected CD-ROM (blocks vMotion, often left behind)
-        $mounted = $vm | Get-CDDrive | Where-Object { $_.IsoPath -or $_.HostDevice -or $_.RemoteDevice }
+        $mounted = $cdByVm[$vm.Uid] | Where-Object { $_.IsoPath -or $_.HostDevice -or $_.RemoteDevice }
         if ($mounted) {
             $what = ($mounted | ForEach-Object { if ($_.IsoPath) { $_.IsoPath } else { 'host/remote device' } }) -join ','
             Add-Result 'VMCompliance' $vm.Name 'MountedMedia' 'WARN' "Connected media: $what"
         }
 
         # Snapshot age
-        $snaps = $vm | Get-Snapshot
+        $snaps = $snapsByVm[$vm.Uid]
         foreach ($s in $snaps) {
             $ageDays = [math]::Round((New-TimeSpan -Start $s.Created -End (Get-Date)).TotalDays, 1)
             $sizeGB  = [math]::Round($s.SizeGB, 1)
