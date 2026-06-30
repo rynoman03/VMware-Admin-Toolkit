@@ -51,6 +51,16 @@
 .NOTES
     Requires PowerCLI. Install with:  Install-Module VCF.PowerCLI -Scope CurrentUser
     (older releases use the VMware.PowerCLI module name; both are supported)
+
+    Runtime: scales with total inventory across all connected vCenters,
+    since checks run per-host and per-VM (each a round-trip to vCenter).
+    Rough estimates:
+      ~25 VMs / 2-3 hosts ....... under a minute
+      ~150 VMs .................. a few minutes
+      500+ VMs .................. 10+ minutes
+    Add ~10-30s for the initial PowerCLI module import. Multiple vCenters
+    add their inventories together. As long as [PASS]/[WARN] lines keep
+    printing it is working, not hung.
 #>
 
 [CmdletBinding()]

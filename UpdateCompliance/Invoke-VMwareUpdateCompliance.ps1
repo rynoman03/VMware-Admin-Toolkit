@@ -60,6 +60,14 @@
     (older releases use the VMware.PowerCLI module name; both are supported)
     Tools/HW data requires the VM to have run at least once; Tools status is
     only meaningful for powered-on VMs.
+
+    Runtime: scales with total inventory across all connected vCenters,
+    since checks run per-VM. Rough estimates:
+      ~25 VMs ........ under a minute
+      ~150 VMs ....... a few minutes
+      500+ VMs ....... 10+ minutes
+    Add ~10-30s for the initial PowerCLI module import. Multiple vCenters
+    add their inventories together.
 #>
 
 [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High')]

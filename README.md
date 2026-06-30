@@ -43,6 +43,16 @@ The script checks:
 
 Findings are tagged `PASS` / `WARN` / `FAIL` / `INFO`. The script never modifies configuration.
 
+**Runtime** scales with total inventory, since checks run per-host and per-VM (each a round-trip to vCenter). Connecting to multiple vCenters adds their inventories together. Rough guide:
+
+| Inventory | Estimate |
+|-----------|----------|
+| ~25 VMs / 2-3 hosts | under a minute |
+| ~150 VMs | a few minutes |
+| 500+ VMs | 10+ minutes |
+
+Add ~10-30s for the initial PowerCLI module import. As long as `PASS`/`WARN` lines keep printing, it's working — not hung.
+
 ### Update Compliance (VMware Tools & Hardware Version)
 
 ```powershell
