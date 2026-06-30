@@ -283,9 +283,10 @@ finally {
 
     $style = @"
 <style>
- body { font-family: Segoe UI, Arial, sans-serif; margin: 20px; }
+ body { font-family: Segoe UI, Arial, sans-serif; margin: 20px; background: #ffffff; color: #1a1a1a; }
  h1 { color: #333; }
- table { border-collapse: collapse; width: 100%; }
+ h2 { color: #2d3e50; margin-top: 30px; border-bottom: 2px solid #e1e4e8; padding-bottom: 4px; }
+ table { border-collapse: collapse; width: 100%; margin-top: 6px; }
  th, td { border: 1px solid #ddd; padding: 6px 10px; text-align: left; font-size: 13px; }
  th { background: #2d3e50; color: #fff; }
  tr:nth-child(even) { background: #f6f8fa; }
@@ -297,17 +298,27 @@ finally {
  .filters button { font: inherit; font-size: 13px; padding: 6px 12px; margin: 0 6px 6px 0; border: 1px solid #ccc; border-radius: 4px; background: #fff; cursor: pointer; }
  .filters button:hover { border-color: #2d3e50; }
  .filters button.active { background: #2d3e50; color: #fff; border-color: #2d3e50; }
- tr.hidden { display: none; }
+ tr.hidden, h2.hidden, table.hidden { display: none; }
  #emptyNote { color: #57606a; font-style: italic; margin: 12px 0; display: none; }
  .sumlink { cursor: pointer; text-decoration: underline; }
+ .toc { background: #f6f8fa; border: 1px solid #e1e4e8; border-radius: 6px; padding: 12px 18px; margin: 16px 0; }
+ .toc h3 { margin: 0 0 8px; color: #2d3e50; font-size: 15px; }
+ .toc-cat { margin: 8px 0; }
+ .toc-cat-name { font-weight: bold; color: #555; }
+ .toc ul { margin: 4px 0 0; padding-left: 18px; columns: 2; }
+ .toc li { margin: 2px 0; list-style: square; }
+ .toc a { color: #0969da; text-decoration: none; cursor: pointer; }
+ .toc a:hover { text-decoration: underline; }
+ .b { font-size: 11px; font-weight: bold; padding: 0 5px; border-radius: 8px; margin-left: 4px; }
+ .bFAIL { background: #ffebe9; color: #cf222e; }
+ .bWARN { background: #fff8c5; color: #7d4e00; }
+ .muted { color: #8b949e; font-size: 12px; }
+ .seccount { color: #8b949e; font-weight: normal; font-size: 13px; }
+ .backtop { font-size: 12px; margin-left: 10px; font-weight: normal; }
 </style>
 "@
 
     Add-Type -AssemblyName System.Web
-    $rowsHtml = ($script:Results | ForEach-Object {
-        "<tr data-status='$($_.Status)'><td>$($_.Category)</td><td>$($_.Object)</td><td>$($_.Check)</td>" +
-        "<td class='$($_.Status)'>$($_.Status)</td><td>$([System.Web.HttpUtility]::HtmlEncode($_.Detail))</td></tr>"
-    }) -join "`n"
 
     # Per-status counts for the filter buttons. @() guards the PowerShell
     # quirk where a single matching object has no usable .Count.
@@ -323,9 +334,59 @@ finally {
         "<span class='sumlink $($_.Name)' data-filter='$($_.Name)'>$($_.Name)=$($_.Count)</span>"
     }) -join ' &nbsp; ')
 
+    # Group results into per-check sections (Category + Check), preserving
+    # first-seen order. Each becomes its own anchored table, navigable from the
+    # contents/appendix at the top of the report.
+    $sections = New-Object System.Collections.Generic.List[object]
+    $secIndex = @{}
+    foreach ($r in $script:Results) {
+        $key = "$($r.Category)|$($r.Check)"
+        if (-not $secIndex.ContainsKey($key)) {
+            $secIndex[$key] = $sections.Count
+            $sections.Add([pscustomobject]@{
+                Cat   = $r.Category
+                Check = $r.Check
+                Id    = 'sec-' + (($key -replace '[^A-Za-z0-9]+', '-').Trim('-'))
+                Rows  = (New-Object System.Collections.Generic.List[object])
+            })
+        }
+        $sections[$secIndex[$key]].Rows.Add($r)
+    }
+
+    # Contents/appendix, grouped by category
+    $tocHtml = foreach ($catGrp in ($sections | Group-Object Cat)) {
+        $items = foreach ($sec in $catGrp.Group) {
+            $f = @($sec.Rows | Where-Object { $_.Status -eq 'FAIL' }).Count
+            $w = @($sec.Rows | Where-Object { $_.Status -eq 'WARN' }).Count
+            $badges = ''
+            if ($f -gt 0) { $badges += "<span class='b bFAIL'>$f FAIL</span>" }
+            if ($w -gt 0) { $badges += "<span class='b bWARN'>$w WARN</span>" }
+            "<li><a data-jump='$($sec.Id)' href='#$($sec.Id)'>$($sec.Check)</a> <span class='muted'>($($sec.Rows.Count))</span>$badges</li>"
+        }
+        "<div class='toc-cat'><span class='toc-cat-name'>$($catGrp.Name)</span><ul>$($items -join '')</ul></div>"
+    }
+    $tocHtml = $tocHtml -join "`n"
+
+    # One anchored section + table per Check (Object / Status / Detail columns;
+    # Category and Check live in the heading)
+    $bodyHtml = foreach ($sec in $sections) {
+        $secRows = ($sec.Rows | ForEach-Object {
+            "<tr data-status='$($_.Status)'><td>$([System.Web.HttpUtility]::HtmlEncode($_.Object))</td>" +
+            "<td class='$($_.Status)'>$($_.Status)</td><td>$([System.Web.HttpUtility]::HtmlEncode($_.Detail))</td></tr>"
+        }) -join "`n"
+        @"
+<h2 id="$($sec.Id)" data-section="$($sec.Id)">$($sec.Cat) &rsaquo; $($sec.Check) <span class="seccount">($($sec.Rows.Count))</span> <a class="backtop" href="#top">&uarr; top</a></h2>
+<table data-section-table="$($sec.Id)"><tr><th>Object</th><th>Status</th><th>Detail</th></tr>
+$secRows
+</table>
+"@
+    }
+    $bodyHtml = $bodyHtml -join "`n"
+
     $html = @"
 <!DOCTYPE html><html><head><meta charset='utf-8'>$style
 <title>VMware Update Compliance $stamp</title></head><body>
+<a id="top"></a>
 <h1>VMware Update Compliance Report</h1>
 <p>Generated: $(Get-Date)<br>vCenter(s): $($VCenter -join ', ')<br>
 Target hardware version: vmx-$targetHwNum<br>
@@ -338,15 +399,27 @@ Summary: $summaryHtml &nbsp; <span style='color:#57606a'>(click a number or butt
  <button data-filter="PASS">PASS ($cPass)</button>
  <button data-filter="all">All ($cAll)</button>
 </div>
+<div class="toc">
+ <h3>Contents &mdash; jump to a section</h3>
+ $tocHtml
+</div>
 <p id="emptyNote">Nothing matches this filter.</p>
-<table><tr><th>Category</th><th>Object</th><th>Check</th><th>Status</th><th>Detail</th></tr>
-$rowsHtml
-</table>
+$bodyHtml
 <script>
 (function(){
  var buttons = document.querySelectorAll('.filters button');
  var rows = document.querySelectorAll('table tr[data-status]');
  var note = document.getElementById('emptyNote');
+ var tables = document.querySelectorAll('[data-section-table]');
+ function refreshSections(){
+  tables.forEach(function(tbl){
+   var id = tbl.getAttribute('data-section-table');
+   var vis = tbl.querySelectorAll('tr[data-status]:not(.hidden)').length;
+   var head = document.querySelector('[data-section="' + id + '"]');
+   tbl.classList.toggle('hidden', vis === 0);
+   if (head) head.classList.toggle('hidden', vis === 0);
+  });
+ }
  function apply(filter){
   var visible = 0;
   rows.forEach(function(r){
@@ -356,10 +429,19 @@ $rowsHtml
    if (show) visible++;
   });
   buttons.forEach(function(b){ b.classList.toggle('active', b.getAttribute('data-filter') === filter); });
+  refreshSections();
   note.style.display = visible ? 'none' : 'block';
  }
  buttons.forEach(function(b){ b.addEventListener('click', function(){ apply(b.getAttribute('data-filter')); }); });
  document.querySelectorAll('.sumlink').forEach(function(s){ s.addEventListener('click', function(){ apply(s.getAttribute('data-filter')); }); });
+ document.querySelectorAll('[data-jump]').forEach(function(a){
+  a.addEventListener('click', function(e){
+   e.preventDefault();
+   apply('all');
+   var el = document.getElementById(a.getAttribute('data-jump'));
+   if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
+ });
  apply('attention');
 })();
 </script>

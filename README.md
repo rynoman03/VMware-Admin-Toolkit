@@ -60,7 +60,9 @@ Add ~10-30s for the initial PowerCLI module import. As long as `PASS`/`WARN` lin
 
 Both carry the columns **Category, Object, Check, Status, Detail**, and are written in a `finally` block — so you still get a report even if the run errors partway through. Pass `-ReportPath C:\Reports` to keep output in a fixed location instead of wherever you launched from.
 
-The **HTML report opens pre-filtered to just `FAIL` + `WARN`** (what needs fixing), with clickable buttons at the top — `Needs attention`, `FAIL`, `WARN`, `INFO`, `PASS`, `All` — each showing a live count, so you can drill straight to the problems instead of scrolling past everything that passed. (The CSV stays complete and unfiltered for trending; open it in Excel and use AutoFilter on the Status column for the same effect.)
+The **HTML report opens pre-filtered to just `FAIL` + `WARN`** (what needs fixing), with clickable buttons at the top — `Needs attention`, `FAIL`, `WARN`, `INFO`, `PASS`, `All` — each showing a live count, so you can drill straight to the problems instead of scrolling past everything that passed. The summary numbers themselves are clickable too.
+
+Results are also broken into **per-check sections** (e.g. *VMware Tools*, *Hardware Version*, *Mounted ISOs*, *Snapshots*, *NTP*, *Datastore Free*), each its own table. A **Contents/appendix at the top** lists every section grouped by category with per-section counts and `FAIL`/`WARN` badges — click an entry to jump straight to that table. Severity filtering and section navigation work together: under a filter, sections with no matching rows are hidden automatically, and clicking a Contents link reveals the target. (The CSV stays complete and unfiltered for trending; open it in Excel and use AutoFilter on the Status column for the same effect.)
 
 ### Update Compliance (VMware Tools & Hardware Version)
 
