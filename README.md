@@ -60,6 +60,8 @@ Add ~10-30s for the initial PowerCLI module import. As long as `PASS`/`WARN` lin
 
 Both carry the columns **Category, Object, Check, Status, Detail**, and are written in a `finally` block — so you still get a report even if the run errors partway through. Pass `-ReportPath C:\Reports` to keep output in a fixed location instead of wherever you launched from.
 
+The **HTML report opens pre-filtered to just `FAIL` + `WARN`** (what needs fixing), with clickable buttons at the top — `Needs attention`, `FAIL`, `WARN`, `INFO`, `PASS`, `All` — each showing a live count, so you can drill straight to the problems instead of scrolling past everything that passed. (The CSV stays complete and unfiltered for trending; open it in Excel and use AutoFilter on the Status column for the same effect.)
+
 ### Update Compliance (VMware Tools & Hardware Version)
 
 ```powershell
@@ -77,7 +79,7 @@ Both carry the columns **Category, Object, Check, Status, Detail**, and are writ
 - Hardware upgrades only run on **powered-off** VMs — powered-on VMs are skipped, never forced off.
 - Both remediation paths support `-WhatIf` and `-Confirm`. Always run with `-WhatIf` first.
 
-**Output.** Like the health check, results are written to two timestamped files in `-ReportPath` (**defaults to the current directory**): `VMwareUpdateCompliance-<yyyyMMdd-HHmmss>.html` and `.csv`, both with the columns **Category, Object, Check, Status, Detail**, produced in a `finally` block even if the run errors. Pass `-ReportPath C:\Reports` to fix the location.
+**Output.** Like the health check, results are written to two timestamped files in `-ReportPath` (**defaults to the current directory**): `VMwareUpdateCompliance-<yyyyMMdd-HHmmss>.html` and `.csv`, both with the columns **Category, Object, Check, Status, Detail**, produced in a `finally` block even if the run errors. Pass `-ReportPath C:\Reports` to fix the location. The HTML report opens pre-filtered to `FAIL` + `WARN` with the same clickable status buttons as the health check.
 
 ## Conventions
 

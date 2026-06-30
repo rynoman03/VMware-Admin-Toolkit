@@ -293,14 +293,29 @@ finally {
  .WARN { color: #b88600; font-weight: bold; }
  .FAIL { color: #cf222e; font-weight: bold; }
  .INFO { color: #57606a; }
+ .filters { margin: 16px 0; }
+ .filters button { font: inherit; font-size: 13px; padding: 6px 12px; margin: 0 6px 6px 0; border: 1px solid #ccc; border-radius: 4px; background: #fff; cursor: pointer; }
+ .filters button:hover { border-color: #2d3e50; }
+ .filters button.active { background: #2d3e50; color: #fff; border-color: #2d3e50; }
+ tr.hidden { display: none; }
+ #emptyNote { color: #57606a; font-style: italic; margin: 12px 0; display: none; }
 </style>
 "@
 
     Add-Type -AssemblyName System.Web
     $rowsHtml = ($script:Results | ForEach-Object {
-        "<tr><td>$($_.Category)</td><td>$($_.Object)</td><td>$($_.Check)</td>" +
+        "<tr data-status='$($_.Status)'><td>$($_.Category)</td><td>$($_.Object)</td><td>$($_.Check)</td>" +
         "<td class='$($_.Status)'>$($_.Status)</td><td>$([System.Web.HttpUtility]::HtmlEncode($_.Detail))</td></tr>"
     }) -join "`n"
+
+    # Per-status counts for the filter buttons. @() guards the PowerShell
+    # quirk where a single matching object has no usable .Count.
+    $cFail = @($script:Results | Where-Object { $_.Status -eq 'FAIL' }).Count
+    $cWarn = @($script:Results | Where-Object { $_.Status -eq 'WARN' }).Count
+    $cInfo = @($script:Results | Where-Object { $_.Status -eq 'INFO' }).Count
+    $cPass = @($script:Results | Where-Object { $_.Status -eq 'PASS' }).Count
+    $cAttn = $cFail + $cWarn
+    $cAll  = @($script:Results).Count
 
     $html = @"
 <!DOCTYPE html><html><head><meta charset='utf-8'>$style
@@ -309,9 +324,39 @@ finally {
 <p>Generated: $(Get-Date)<br>vCenter(s): $($VCenter -join ', ')<br>
 Target hardware version: vmx-$targetHwNum<br>
 Summary: $($summary -join ' &nbsp; ')</p>
+<div class="filters">
+ <button data-filter="attention" class="active">Needs attention &mdash; FAIL + WARN ($cAttn)</button>
+ <button data-filter="FAIL">FAIL ($cFail)</button>
+ <button data-filter="WARN">WARN ($cWarn)</button>
+ <button data-filter="INFO">INFO ($cInfo)</button>
+ <button data-filter="PASS">PASS ($cPass)</button>
+ <button data-filter="all">All ($cAll)</button>
+</div>
+<p id="emptyNote">Nothing matches this filter.</p>
 <table><tr><th>Category</th><th>Object</th><th>Check</th><th>Status</th><th>Detail</th></tr>
 $rowsHtml
-</table></body></html>
+</table>
+<script>
+(function(){
+ var buttons = document.querySelectorAll('.filters button');
+ var rows = document.querySelectorAll('table tr[data-status]');
+ var note = document.getElementById('emptyNote');
+ function apply(filter){
+  var visible = 0;
+  rows.forEach(function(r){
+   var s = r.getAttribute('data-status');
+   var show = (filter === 'all') || (filter === 'attention' ? (s === 'FAIL' || s === 'WARN') : (s === filter));
+   r.classList.toggle('hidden', !show);
+   if (show) visible++;
+  });
+  buttons.forEach(function(b){ b.classList.toggle('active', b.getAttribute('data-filter') === filter); });
+  note.style.display = visible ? 'none' : 'block';
+ }
+ buttons.forEach(function(b){ b.addEventListener('click', function(){ apply(b.getAttribute('data-filter')); }); });
+ apply('attention');
+})();
+</script>
+</body></html>
 "@
     $html | Out-File -FilePath $htmlFile -Encoding utf8
     Write-Host "HTML report written to: $htmlFile" -ForegroundColor Green
