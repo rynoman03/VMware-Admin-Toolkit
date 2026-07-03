@@ -22,7 +22,7 @@
     Folder for the HTML report. Defaults to the current directory.
 
 .PARAMETER SnapshotAgeWarningDays
-    Snapshots older than this (days) are flagged. Default 3.
+    Snapshots at least this many days old are flagged. Default 3.
 
 .PARAMETER DatastoreFreeWarnPercent
     Datastores below this free % are WARN. Default 20.
@@ -31,7 +31,7 @@
     Datastores below this free % are FAIL. Default 10.
 
 .PARAMETER ClusterUsageWarnPercent
-    Cluster CPU/RAM usage above this % is WARN. Default 80.
+    Cluster CPU/RAM usage at or above this % is WARN. Default 80.
 
 .PARAMETER OSDriveFreeWarnGB
     Guest OS system drive (C:\ on Windows, / on Linux) with less than this many GB
@@ -40,6 +40,9 @@
 .PARAMETER DataDriveFreeWarnGB
     Any other guest drive (non-OS volume) with less than this many GB free is
     flagged. Requires VMware Tools running in the guest. Default 10.
+
+.PARAMETER HardwareVersionWarnNum
+    VM hardware versions below this number (vmx-NN) are flagged as old. Default 13.
 
 .EXAMPLE
     .\Invoke-VMwareHealthCheck.ps1 -VCenter vcenter01.corp.local
@@ -85,7 +88,8 @@ param(
     [int] $DatastoreFreeCritPercent = 10,
     [int] $ClusterUsageWarnPercent  = 80,
     [int] $OSDriveFreeWarnGB        = 20,
-    [int] $DataDriveFreeWarnGB      = 10
+    [int] $DataDriveFreeWarnGB      = 10,
+    [int] $HardwareVersionWarnNum   = 13
 )
 
 #region --- Setup -------------------------------------------------------------
@@ -213,7 +217,7 @@ try {
     $cdByVm     = @{}
     $floppyByVm = @{}
     if ($vms) {
-        Write-Host "  Pre-fetching snapshots and media for $($vms.Count) VM(s)..." -ForegroundColor DarkGray
+        Write-Host "  Pre-fetching snapshots and media for $(@($vms).Count) VM(s)..." -ForegroundColor DarkGray
         foreach ($s in (Get-Snapshot -VM $vms)) {
             $key = $s.VM.Uid
             if (-not $snapsByVm.ContainsKey($key)) { $snapsByVm[$key] = [System.Collections.Generic.List[object]]::new() }
@@ -280,7 +284,7 @@ try {
         $hwVersion = $vm.HardwareVersion
         $hwNum = 0
         if ($hwVersion -match 'vmx-(\d+)') { $hwNum = [int]$Matches[1] }
-        if ($hwNum -gt 0 -and $hwNum -lt 13) {
+        if ($hwNum -gt 0 -and $hwNum -lt $HardwareVersionWarnNum) {
             Add-Result 'VMCompliance' $vm.Name 'HardwareVersion' 'WARN' "$hwVersion (consider upgrading)"
         } else {
             Add-Result 'VMCompliance' $vm.Name 'HardwareVersion' 'PASS' "$hwVersion"
@@ -389,7 +393,7 @@ try {
         }
 
         # Host count / EVC sanity
-        $hostCount = ($cl | Get-VMHost).Count
+        $hostCount = @($cl | Get-VMHost).Count
         if ($cl.HAEnabled -and $hostCount -lt 2) {
             Add-Result 'ClusterConfig' $cl.Name 'HostCount' 'WARN' "Only $hostCount host(s) - HA cannot fail over"
         }
