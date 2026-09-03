@@ -1,0 +1,14 @@
+#!/bin/sh
+# Keeps "Last updated MM.YYYY" header lines in sync with the commit date, in
+# any staged file that already has one. Does not add the line to files that
+# don't have it.
+
+today=$(date +%m.%Y)
+
+git diff --cached --name-only --diff-filter=ACMR | while IFS= read -r f; do
+    [ -f "$f" ] || continue
+    if grep -qE '[Ll]ast [Uu]pdated:? +[0-9]{2}\.[0-9]{4}' "$f"; then
+        sed -i -E "s/([Ll]ast [Uu]pdated:? +)[0-9]{2}\.[0-9]{4}/\1${today}/" "$f"
+        git add "$f"
+    fi
+done
