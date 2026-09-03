@@ -4,7 +4,7 @@
 
 .DESCRIPTION
     Connects to one or more vCenter Servers and evaluates four areas:
-        1. Host health     - connection state, NTP, syslog, uptime, datastore connectivity
+        1. Host health     - connection state, NTP, syslog, uptime, datastore connectivity, storage path state
         2. VM compliance   - VMware Tools, VM hardware version, mounted ISOs, floppy drives, snapshot age
         3. Capacity        - datastore free space, cluster CPU/RAM utilization
         4. Cluster config  - HA / DRS / admission control
@@ -199,6 +199,36 @@ try {
             Add-Result 'HostHealth' $h.Name 'DatastoreConnectivity' 'FAIL' "Inaccessible: $(($inaccessible.Name) -join ',')"
         } else {
             Add-Result 'HostHealth' $h.Name 'DatastoreConnectivity' 'PASS' 'All datastores accessible'
+        }
+
+        # Storage path state - a LUN can still show as "accessible" on remaining
+        # paths while one or more of its FC/iSCSI paths are dead, silently
+        # running with reduced (or zero) redundancy. DatastoreConnectivity
+        # above won't catch that; this walks the actual multipathing state.
+        $luns = @($h | Get-ScsiLun -LunType disk -ErrorAction SilentlyContinue)
+        $pathIssues  = New-Object System.Collections.Generic.List[object]
+        $totalPaths  = 0
+        $anyLunDown  = $false
+        foreach ($lun in $luns) {
+            $paths  = @(Get-ScsiLunPath -ScsiLun $lun -ErrorAction SilentlyContinue)
+            $totalPaths += $paths.Count
+            $dead   = @($paths | Where-Object { $_.State -in @('Dead','Disabled') })
+            $active = @($paths | Where-Object { $_.State -notin @('Dead','Disabled') })
+            if ($dead.Count -eq 0) { continue }
+            if ($active.Count -eq 0) {
+                $anyLunDown = $true
+                $pathIssues.Add("$($lun.CanonicalName): all $($paths.Count) paths down")
+            } else {
+                $pathIssues.Add("$($lun.CanonicalName): $($dead.Count) of $($paths.Count) paths down")
+            }
+        }
+        if ($pathIssues.Count -gt 0) {
+            $severity = if ($anyLunDown) { 'FAIL' } else { 'WARN' }
+            Add-Result 'HostHealth' $h.Name 'PathState' $severity ($pathIssues -join '; ')
+        } elseif ($luns.Count -gt 0) {
+            Add-Result 'HostHealth' $h.Name 'PathState' 'PASS' "$totalPaths path(s) across $($luns.Count) LUN(s), all active"
+        } else {
+            Add-Result 'HostHealth' $h.Name 'PathState' 'INFO' 'No block storage LUNs found (e.g. NFS-only host)'
         }
     }
     #endregion
