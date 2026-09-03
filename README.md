@@ -65,6 +65,10 @@ The **HTML report opens pre-filtered to just `FAIL` + `WARN`** (what needs fixin
 
 Results are also broken into **per-check sections** (e.g. *VMware Tools*, *Hardware Version*, *Mounted ISOs*, *Snapshots*, *NTP*, *Datastore Free*), each in its own table. A **Contents/appendix at the top** lists every section grouped by category with per-section counts and `FAIL`/`WARN` badges — click an entry to jump straight to that table. Severity filtering and section navigation work together: under a filter, sections with no matching rows are hidden automatically, and clicking a Contents link reveals the target. (The CSV stays complete and unfiltered for trending; open it in Excel and use AutoFilter on the Status column for the same effect.)
 
+**Sample report** (fictional lab data):
+
+![Sample health check HTML report](docs/img/healthcheck-sample.png)
+
 ### Update Compliance (VMware Tools & Hardware Version)
 
 ```powershell
@@ -103,6 +107,10 @@ For every host, compares MTU across three layers per network path and flags wher
 If CDP is disabled, or the connected switch only speaks LLDP, the CDP-vs-switch checks report `INFO` instead of guessing at a `PASS`/`FAIL`. Findings are tagged `PASS` / `WARN` / `FAIL` / `INFO`; the script never modifies configuration.
 
 **Output.** Like the other reports, results are written to two timestamped files in `-ReportPath` (**defaults to the current directory**): `VMwareMtuConsistencyCheck-<yyyyMMdd-HHmmss>.html` and `.csv`, both with the columns **Category, Object, Check, Status, Detail**, produced in a `finally` block even if the run errors. The HTML report opens pre-filtered to `FAIL` + `WARN` with the same clickable status buttons and per-check sections as the health check.
+
+**Sample report** (fictional lab data):
+
+![Sample MTU consistency check HTML report](docs/img/mtu-consistency-check-sample.png)
 
 ## Conventions
 
