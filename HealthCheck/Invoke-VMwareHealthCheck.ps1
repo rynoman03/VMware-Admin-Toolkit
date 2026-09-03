@@ -4,7 +4,7 @@
 
 .DESCRIPTION
     Connects to one or more vCenter Servers and evaluates four areas:
-        1. Host health     - connection state, NTP, syslog, uptime, datastore connectivity, storage path state
+        1. Host health     - connection state, NTP, syslog, uptime, datastore connectivity, storage path state, TLS certificate expiry (hosts + vCenter), local account password expiration policy
         2. VM compliance   - VMware Tools, VM hardware version, mounted ISOs, floppy drives, snapshot age
         3. Capacity        - datastore free space, cluster CPU/RAM utilization
         4. Cluster config  - HA / DRS / admission control
@@ -40,6 +40,14 @@
 .PARAMETER DataDriveFreeWarnGB
     Any other guest drive (non-OS volume) with less than this many GB free is
     flagged. Requires VMware Tools running in the guest. Default 10.
+
+.PARAMETER CertExpiryWarnDays
+    ESXi host and vCenter TLS certificates expiring within this many days are
+    WARN. Default 30.
+
+.PARAMETER CertExpiryCritDays
+    ESXi host and vCenter TLS certificates expiring within this many days (or
+    already expired) are FAIL. Default 7.
 
 .PARAMETER HardwareVersionWarnNum
     VM hardware versions below this number (vmx-NN) are flagged as old. Default 13.
@@ -89,7 +97,9 @@ param(
     [int] $ClusterUsageWarnPercent  = 80,
     [int] $OSDriveFreeWarnGB        = 20,
     [int] $DataDriveFreeWarnGB      = 10,
-    [int] $HardwareVersionWarnNum   = 13
+    [int] $HardwareVersionWarnNum   = 13,
+    [int] $CertExpiryWarnDays       = 30,
+    [int] $CertExpiryCritDays       = 7
 )
 
 #region --- Setup -------------------------------------------------------------
@@ -160,6 +170,39 @@ if (-not $connections) { throw "No vCenter connections established. Aborting." }
 try {
     #region --- 1. Host health -----------------------------------------------
     Write-Host "`n=== Host Health ===" -ForegroundColor Cyan
+
+    # vCenter's own presented TLS certificate - independent of ESXi host certs,
+    # fetched via a raw TLS handshake so it doesn't depend on a particular
+    # vSphere API version or SSO/VECS cmdlet being available.
+    foreach ($vc in $VCenter) {
+        $tcpClient = $null
+        $sslStream = $null
+        try {
+            $tcpClient = New-Object System.Net.Sockets.TcpClient
+            $tcpClient.Connect($vc, 443)
+            $validation = { param($tlsSender, $tlsCertificate, $tlsChain, $tlsPolicyErrors) $true }
+            $sslStream = New-Object System.Net.Security.SslStream($tcpClient.GetStream(), $false, $validation)
+            $sslStream.AuthenticateAsClient($vc)
+            $vcCert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($sslStream.RemoteCertificate)
+
+            $daysLeft = [math]::Round((New-TimeSpan -Start (Get-Date) -End $vcCert.NotAfter).TotalDays, 1)
+            if ($daysLeft -lt 0) {
+                Add-Result 'HostHealth' $vc 'CertificateExpiry' 'FAIL' "Expired $([math]::Abs($daysLeft)) day(s) ago (NotAfter: $($vcCert.NotAfter))"
+            } elseif ($daysLeft -le $CertExpiryCritDays) {
+                Add-Result 'HostHealth' $vc 'CertificateExpiry' 'FAIL' "Expires in $daysLeft day(s) (NotAfter: $($vcCert.NotAfter))"
+            } elseif ($daysLeft -le $CertExpiryWarnDays) {
+                Add-Result 'HostHealth' $vc 'CertificateExpiry' 'WARN' "Expires in $daysLeft day(s) (NotAfter: $($vcCert.NotAfter))"
+            } else {
+                Add-Result 'HostHealth' $vc 'CertificateExpiry' 'PASS' "Valid until $($vcCert.NotAfter) ($daysLeft days)"
+            }
+        } catch {
+            Add-Result 'HostHealth' $vc 'CertificateExpiry' 'WARN' "Could not retrieve vCenter certificate: $($_.Exception.Message)"
+        } finally {
+            if ($sslStream) { $sslStream.Close() }
+            if ($tcpClient) { $tcpClient.Close() }
+        }
+    }
+
     $vmHosts = Get-VMHost
 
     foreach ($h in $vmHosts) {
@@ -229,6 +272,39 @@ try {
             Add-Result 'HostHealth' $h.Name 'PathState' 'PASS' "$totalPaths path(s) across $($luns.Count) LUN(s), all active"
         } else {
             Add-Result 'HostHealth' $h.Name 'PathState' 'INFO' 'No block storage LUNs found (e.g. NFS-only host)'
+        }
+
+        # ESXi host TLS certificate expiry
+        $hostCert = $h.ExtensionData.Config.Certificate
+        if ($hostCert -and $hostCert.NotAfter) {
+            $daysLeft = [math]::Round((New-TimeSpan -Start (Get-Date) -End $hostCert.NotAfter).TotalDays, 1)
+            if ($daysLeft -lt 0) {
+                Add-Result 'HostHealth' $h.Name 'CertificateExpiry' 'FAIL' "Expired $([math]::Abs($daysLeft)) day(s) ago (NotAfter: $($hostCert.NotAfter))"
+            } elseif ($daysLeft -le $CertExpiryCritDays) {
+                Add-Result 'HostHealth' $h.Name 'CertificateExpiry' 'FAIL' "Expires in $daysLeft day(s) (NotAfter: $($hostCert.NotAfter))"
+            } elseif ($daysLeft -le $CertExpiryWarnDays) {
+                Add-Result 'HostHealth' $h.Name 'CertificateExpiry' 'WARN' "Expires in $daysLeft day(s) (NotAfter: $($hostCert.NotAfter))"
+            } else {
+                Add-Result 'HostHealth' $h.Name 'CertificateExpiry' 'PASS' "Valid until $($hostCert.NotAfter) ($daysLeft days)"
+            }
+        } else {
+            Add-Result 'HostHealth' $h.Name 'CertificateExpiry' 'INFO' 'Certificate info not available from vCenter'
+        }
+
+        # Local account password expiration policy (root included). vCenter's API
+        # doesn't expose a specific account's actual days-until-expiry - that lives
+        # only in the host's local shadow file and would require SSH + `chage -l
+        # root` to read. This checks whether password aging is enabled at all.
+        try {
+            $pwExpSetting = $h | Get-AdvancedSetting -Name 'Security.PasswordExpirationInDays' -ErrorAction Stop
+            $pwExpDays = [int]$pwExpSetting.Value
+            if ($pwExpDays -le 0) {
+                Add-Result 'HostHealth' $h.Name 'PasswordExpirationPolicy' 'WARN' 'Security.PasswordExpirationInDays is 0 (disabled) - local account passwords, including root, never expire'
+            } else {
+                Add-Result 'HostHealth' $h.Name 'PasswordExpirationPolicy' 'PASS' "Security.PasswordExpirationInDays = $pwExpDays (root's actual remaining days isn't exposed by the vCenter API; requires SSH to check directly)"
+            }
+        } catch {
+            Add-Result 'HostHealth' $h.Name 'PasswordExpirationPolicy' 'INFO' "Could not read Security.PasswordExpirationInDays: $($_.Exception.Message)"
         }
     }
     #endregion
