@@ -9,6 +9,7 @@ Everything here is built to be safe, parameterized, and report-driven.
 |--------|---------|------------|
 | [`HealthCheck/Invoke-VMwareHealthCheck.ps1`](HealthCheck/Invoke-VMwareHealthCheck.ps1) | Health & compliance report across host health, VM compliance, capacity, and cluster config. Emits color-coded console output plus HTML and CSV reports. | ✅ Yes |
 | [`UpdateCompliance/Invoke-VMwareUpdateCompliance.ps1`](UpdateCompliance/Invoke-VMwareUpdateCompliance.ps1) | Report VMs whose VMware Tools or VM hardware version need updating. Optional opt-in remediation (`-UpdateTools` / `-UpgradeHardware`) guarded by `-WhatIf`/`-Confirm`. | ✅ Report by default |
+| [`ConsistencyCheck/Invoke-VMwareMtuConsistencyCheck.ps1`](ConsistencyCheck/Invoke-VMwareMtuConsistencyCheck.ps1) | Flags MTU mismatches across VMkernel adapters, the standard/distributed vSwitch they sit on, and the MTU the physically connected switch port reports via CDP. Emits color-coded console output plus HTML and CSV reports. | ✅ Yes |
 
 ## Requirements
 
@@ -82,6 +83,26 @@ Results are also broken into **per-check sections** (e.g. *VMware Tools*, *Hardw
 - Both remediation paths support `-WhatIf` and `-Confirm`. Always run with `-WhatIf` first.
 
 **Output.** Like the health check, results are written to two timestamped files in `-ReportPath` (**defaults to the current directory**): `VMwareUpdateCompliance-<yyyyMMdd-HHmmss>.html` and `.csv`, both with the columns **Category, Object, Check, Status, Detail**, produced in a `finally` block even if the run errors. Pass `-ReportPath C:\Reports` to fix the location. The HTML report opens pre-filtered to `FAIL` + `WARN` with the same clickable status buttons as the health check.
+
+### MTU Consistency Check
+
+```powershell
+# Prompted for credentials
+.\ConsistencyCheck\Invoke-VMwareMtuConsistencyCheck.ps1 -VCenter vcenter01.corp.local
+
+# Multiple vCenters, saved credential, custom report path
+$cred = Get-Credential
+.\ConsistencyCheck\Invoke-VMwareMtuConsistencyCheck.ps1 -VCenter vc1,vc2 -Credential $cred -ReportPath C:\Reports
+```
+
+For every host, compares MTU across three layers per network path and flags where they disagree — a common cause of dropped jumbo frames and intermittent storage/vMotion problems:
+
+- **VMkernel adapter** (`vmk0`, vMotion, storage, etc.) vs. the **standard or distributed vSwitch** it's on
+- That same vSwitch/VDS vs. the **MTU reported by the physically connected switch port** (via CDP)
+
+If CDP is disabled, or the connected switch only speaks LLDP, the CDP-vs-switch checks report `INFO` instead of guessing at a `PASS`/`FAIL`. Findings are tagged `PASS` / `WARN` / `FAIL` / `INFO`; the script never modifies configuration.
+
+**Output.** Like the other reports, results are written to two timestamped files in `-ReportPath` (**defaults to the current directory**): `VMwareMtuConsistencyCheck-<yyyyMMdd-HHmmss>.html` and `.csv`, both with the columns **Category, Object, Check, Status, Detail**, produced in a `finally` block even if the run errors. The HTML report opens pre-filtered to `FAIL` + `WARN` with the same clickable status buttons and per-check sections as the health check.
 
 ## Conventions
 
