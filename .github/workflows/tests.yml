@@ -15,6 +15,12 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
 
+    defaults:
+      run:
+        # steps[*].shell allows no expressions at all, so the edition under
+        # test has to be selected here, where the matrix context is available.
+        shell: ${{ matrix.shell }}
+
     strategy:
       # Report every platform's result, not just the first failure - a break
       # confined to one PowerShell edition is the interesting case.
@@ -39,11 +45,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: PowerShell version
-        shell: ${{ matrix.shell }}
         run: $PSVersionTable
 
       - name: Parse-check every script
-        shell: ${{ matrix.shell }}
         run: |
           $bad = $false
           Get-ChildItem -Path . -Recurse -File |
@@ -64,7 +68,6 @@ jobs:
           if ($bad) { exit 1 }
 
       - name: Run health check tests
-        shell: ${{ matrix.shell }}
         run: |
           # Windows only: on Linux this throws a terminating
           # PlatformNotSupportedException that -ErrorAction cannot suppress.
