@@ -95,6 +95,7 @@ Results are also broken into **per-check sections** (e.g. *VMware Tools*, *Hardw
 - **Report-only by default.** Remediation is opt-in via `-UpdateTools` / `-UpgradeHardware`.
 - Hardware upgrades only run on **powered-off** VMs — powered-on VMs are skipped, never forced off.
 - Both remediation paths support `-WhatIf` and `-Confirm`. Always run with `-WhatIf` first.
+- Untrusted/self-signed vCenter certificates are accepted by default (`-TrustAllCertificates`); pass `-TrustAllCertificates:$false` to require a valid chain.
 
 **Output.** Like the health check, results are written to two timestamped files in `-ReportPath` (**defaults to the current directory**): `VMwareUpdateCompliance-<yyyyMMdd-HHmmss>.html` and `.csv`, both with the columns **Category, Object, Check, Status, Detail**, produced in a `finally` block even if the run errors. Pass `-ReportPath C:\Reports` to fix the location. The HTML report opens pre-filtered to `FAIL` + `WARN` with the same clickable status buttons as the health check.
 
@@ -113,6 +114,7 @@ For every host, compares MTU across three layers per network path and flags wher
 
 - **VMkernel adapter** (`vmk0`, vMotion, storage, etc.) vs. the **standard or distributed vSwitch** it's on
 - That same vSwitch/VDS vs. the **MTU reported by the physically connected switch port** (via CDP)
+- Untrusted/self-signed vCenter certificates are accepted by default (`-TrustAllCertificates`); pass `-TrustAllCertificates:$false` to require a valid chain.
 
 If CDP is disabled, or the connected switch only speaks LLDP, the CDP-vs-switch checks report `INFO` instead of guessing at a `PASS`/`FAIL`. Findings are tagged `PASS` / `WARN` / `FAIL` / `INFO`; the script never modifies configuration.
 

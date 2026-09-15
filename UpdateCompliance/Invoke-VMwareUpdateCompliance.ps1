@@ -43,6 +43,12 @@
     With -UpdateTools, pass through to suppress the automatic guest reboot the
     Tools upgrade may trigger (Windows). Default behavior is VMware's default.
 
+.PARAMETER TrustAllCertificates
+    Whether to ignore untrusted/self-signed vCenter TLS certificates when
+    connecting (PowerCLI's InvalidCertificateAction). Default $true, since
+    many vCenters run on internal or self-signed certs. Pass
+    -TrustAllCertificates:$false to require a valid chain instead.
+
 .EXAMPLE
     # Report only
     .\Invoke-VMwareUpdateCompliance.ps1 -VCenter vcenter01.corp.local
@@ -91,7 +97,8 @@ param(
 
     [switch] $UpdateTools,
     [switch] $UpgradeHardware,
-    [switch] $NoReboot
+    [switch] $NoReboot,
+    [switch] $TrustAllCertificates = $true
 )
 
 #region --- Setup -------------------------------------------------------------
@@ -139,37 +146,47 @@ if (-not $pcliModule) {
     throw "PowerCLI (VCF.PowerCLI or VMware.PowerCLI) is not installed for this PowerShell edition ($($PSVersionTable.PSEdition)).$hint Run: Install-Module VCF.PowerCLI -Scope CurrentUser"
 }
 Import-Module $pcliModule -ErrorAction Stop | Out-Null
-Set-PowerCLIConfiguration -Scope Session -InvalidCertificateAction Ignore -ParticipateInCeip $false -Confirm:$false | Out-Null
+
+# -TrustAllCertificates (default on) ignores untrusted/self-signed vCenter
+# certs; pass -TrustAllCertificates:$false to require a valid chain instead.
+$certAction = if ($TrustAllCertificates) { 'Ignore' } else { 'Fail' }
+Set-PowerCLIConfiguration -Scope Session -InvalidCertificateAction $certAction -ParticipateInCeip $false -Confirm:$false | Out-Null
 
 #endregion
 
-#region --- Connect -----------------------------------------------------------
-
-Write-Host "`nConnecting to vCenter(s): $($VCenter -join ', ')" -ForegroundColor Cyan
 $connections = @()
-foreach ($vc in $VCenter) {
-    try {
-        $params = @{ Server = $vc; ErrorAction = 'Stop' }
-        if ($Credential) { $params.Credential = $Credential }
-        $connections += Connect-VIServer @params
-        Write-Host "  Connected to $vc" -ForegroundColor Green
-    } catch {
-        Write-Host "  FAILED to connect to $vc : $($_.Exception.Message)" -ForegroundColor Red
-    }
-}
-if (-not $connections) { throw "No vCenter connections established. Aborting." }
 
-Write-Host ("Mode: {0}   Target HW: vmx-{1}" -f `
-    $(if ($UpdateTools -or $UpgradeHardware) { 'REMEDIATE' } else { 'REPORT-ONLY' }), $targetHwNum) -ForegroundColor Cyan
-
-#endregion
+# Track which VMs are flagged so remediation only touches those. Declared
+# before the try so the finally block's summary line is always well-defined,
+# even if the run errors before Get-VM completes.
+$toolsToUpdate = New-Object System.Collections.Generic.List[object]
+$hwToUpgrade   = New-Object System.Collections.Generic.List[object]
 
 try {
-    $vms = Get-VM | Sort-Object Name
+    #region --- Connect ---------------------------------------------------------
+    # Kept inside the try so a connection failure still lands in the HTML/CSV
+    # report (via Add-Result below) instead of only the console, and so the
+    # finally block still runs (and produces a report) even if every
+    # connection fails.
+    Write-Host "`nConnecting to vCenter(s): $($VCenter -join ', ')" -ForegroundColor Cyan
+    foreach ($vc in $VCenter) {
+        try {
+            $params = @{ Server = $vc; ErrorAction = 'Stop' }
+            if ($Credential) { $params.Credential = $Credential }
+            $connections += Connect-VIServer @params
+            Write-Host "  Connected to $vc" -ForegroundColor Green
+        } catch {
+            Write-Host "  FAILED to connect to $vc : $($_.Exception.Message)" -ForegroundColor Red
+            Add-Result 'Connection' $vc 'Connect' 'FAIL' "Could not connect: $($_.Exception.Message)"
+        }
+    }
+    if (-not $connections) { throw "No vCenter connections established. Aborting." }
 
-    # Track which VMs are flagged so remediation only touches those
-    $toolsToUpdate = New-Object System.Collections.Generic.List[object]
-    $hwToUpgrade   = New-Object System.Collections.Generic.List[object]
+    Write-Host ("Mode: {0}   Target HW: vmx-{1}" -f `
+        $(if ($UpdateTools -or $UpgradeHardware) { 'REMEDIATE' } else { 'REPORT-ONLY' }), $targetHwNum) -ForegroundColor Cyan
+    #endregion
+
+    $vms = Get-VM -Server $connections | Sort-Object Name
 
     #region --- 1. VMware Tools ----------------------------------------------
     Write-Host "`n=== VMware Tools ===" -ForegroundColor Cyan
@@ -270,6 +287,13 @@ try {
         }
     }
     #endregion
+}
+catch {
+    # Log a clean one-line message, then rethrow so the run still surfaces as
+    # a failure to the caller/scheduler. The finally block below still runs
+    # first and writes whatever results were collected before the error.
+    Write-Host "`nRun failed: $($_.Exception.Message)" -ForegroundColor Red
+    throw
 }
 finally {
     #region --- Report + disconnect ------------------------------------------

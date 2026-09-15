@@ -21,6 +21,12 @@
 .PARAMETER ReportPath
     Folder for the HTML report. Defaults to the current directory.
 
+.PARAMETER TrustAllCertificates
+    Whether to ignore untrusted/self-signed vCenter TLS certificates when
+    connecting (PowerCLI's InvalidCertificateAction). Default $true, since
+    many vCenters run on internal or self-signed certs. Pass
+    -TrustAllCertificates:$false to require a valid chain instead.
+
 .EXAMPLE
     .\Invoke-VMwareMtuConsistencyCheck.ps1 -VCenter vcenter01.corp.local
 
@@ -52,7 +58,9 @@ param(
 
     [System.Management.Automation.PSCredential] $Credential,
 
-    [string] $ReportPath = (Get-Location).Path
+    [string] $ReportPath = (Get-Location).Path,
+
+    [switch] $TrustAllCertificates = $true
 )
 
 #region --- Setup -------------------------------------------------------------
@@ -97,33 +105,40 @@ if (-not $pcliModule) {
 }
 Import-Module $pcliModule -ErrorAction Stop | Out-Null
 
-# Don't prompt about the CEIP / invalid certs interactively during an unattended run
-Set-PowerCLIConfiguration -Scope Session -InvalidCertificateAction Ignore -ParticipateInCeip $false -Confirm:$false | Out-Null
+# Don't prompt about the CEIP / invalid certs interactively during an unattended run.
+# -TrustAllCertificates (default on) ignores untrusted/self-signed vCenter certs;
+# pass -TrustAllCertificates:$false to require a valid chain instead.
+$certAction = if ($TrustAllCertificates) { 'Ignore' } else { 'Fail' }
+Set-PowerCLIConfiguration -Scope Session -InvalidCertificateAction $certAction -ParticipateInCeip $false -Confirm:$false | Out-Null
 
 #endregion
 
-#region --- Connect -----------------------------------------------------------
-
-Write-Host "`nConnecting to vCenter(s): $($VCenter -join ', ')" -ForegroundColor Cyan
 $connections = @()
-foreach ($vc in $VCenter) {
-    try {
-        $params = @{ Server = $vc; ErrorAction = 'Stop' }
-        if ($Credential) { $params.Credential = $Credential }
-        $connections += Connect-VIServer @params
-        Write-Host "  Connected to $vc" -ForegroundColor Green
-    } catch {
-        Write-Host "  FAILED to connect to $vc : $($_.Exception.Message)" -ForegroundColor Red
-    }
-}
-if (-not $connections) { throw "No vCenter connections established. Aborting." }
-
-#endregion
 
 try {
+    #region --- Connect ---------------------------------------------------------
+    # Kept inside the try so a connection failure still lands in the HTML/CSV
+    # report (via Add-Result below) instead of only the console, and so the
+    # finally block still runs (and produces a report) even if every
+    # connection fails.
+    Write-Host "`nConnecting to vCenter(s): $($VCenter -join ', ')" -ForegroundColor Cyan
+    foreach ($vc in $VCenter) {
+        try {
+            $params = @{ Server = $vc; ErrorAction = 'Stop' }
+            if ($Credential) { $params.Credential = $Credential }
+            $connections += Connect-VIServer @params
+            Write-Host "  Connected to $vc" -ForegroundColor Green
+        } catch {
+            Write-Host "  FAILED to connect to $vc : $($_.Exception.Message)" -ForegroundColor Red
+            Add-Result 'Connection' $vc 'Connect' 'FAIL' "Could not connect: $($_.Exception.Message)"
+        }
+    }
+    if (-not $connections) { throw "No vCenter connections established. Aborting." }
+    #endregion
+
     #region --- MTU consistency ------------------------------------------------
     Write-Host "`n=== MTU Consistency ===" -ForegroundColor Cyan
-    $vmHosts = Get-VMHost
+    $vmHosts = Get-VMHost -Server $connections
 
     foreach ($h in $vmHosts) {
         if ($h.ConnectionState -ne 'Connected') {
@@ -175,7 +190,11 @@ try {
         foreach ($vds in @($h | Get-VDSwitch)) {
             $vdsMtu = $vds.Mtu
             $proxy = $h.ExtensionData.Config.Network.ProxySwitch | Where-Object { $_.DvsUuid -eq $vds.ExtensionData.Uuid }
-            $uplinkNics = @($proxy.Spec.Backing.PnicSpec.PnicDevice)
+            # Guard against $proxy being $null (no matching ProxySwitch entry): the
+            # property chain would otherwise resolve to $null, and @($null) is a
+            # 1-element array containing null rather than an empty one, producing a
+            # spurious row with a blank NIC name below.
+            $uplinkNics = if ($proxy) { @($proxy.Spec.Backing.PnicSpec.PnicDevice) } else { @() }
 
             foreach ($nic in $uplinkNics) {
                 $cdp = $cdpByPnic[$nic]
@@ -190,9 +209,13 @@ try {
                 }
             }
 
+            # Scoped to this VDS via -VDSwitch (not just -Name then filtered) so two
+            # different VDSes with a same-named portgroup (common in multi-datacenter
+            # environments) can't make -Select-Object -First 1 pick the wrong one and
+            # silently drop this VMkernel adapter from the check.
             $vmks = @($h | Get-VMHostNetworkAdapter -VMKernel | Where-Object {
-                $pg = Get-VDPortgroup -Name $_.PortGroupName -ErrorAction SilentlyContinue | Select-Object -First 1
-                $pg -and $pg.VDSwitch.Name -eq $vds.Name
+                $pg = Get-VDPortgroup -VDSwitch $vds -Name $_.PortGroupName -ErrorAction SilentlyContinue | Select-Object -First 1
+                $null -ne $pg
             })
             foreach ($vmk in $vmks) {
                 if ($vmk.Mtu -eq $vdsMtu) {
@@ -204,6 +227,13 @@ try {
         }
     }
     #endregion
+}
+catch {
+    # Log a clean one-line message, then rethrow so the run still surfaces as
+    # a failure to the caller/scheduler. The finally block below still runs
+    # first and writes whatever results were collected before the error.
+    Write-Host "`nRun failed: $($_.Exception.Message)" -ForegroundColor Red
+    throw
 }
 finally {
     #region --- Report + disconnect ------------------------------------------
