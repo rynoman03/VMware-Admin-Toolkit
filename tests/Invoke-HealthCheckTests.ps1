@@ -73,7 +73,7 @@ function Assert-That {
     }
 }
 
-function Get-Rows {
+function Get-ResultRow {
     param($Rows, [string] $Object, [string] $Check)
     # The leading comma matters. Returning @(...) from a function unrolls a
     # single-element array back to a scalar, and in Windows PowerShell 5.1 a
@@ -146,25 +146,25 @@ try {
 
     # Config.Certificate is a byte[] of PEM; reading .NotAfter off it directly
     # always yielded null and every host reported INFO.
-    $cert = Get-Rows $r.Rows 'esx01.fixture.local' 'CertificateExpiry'
+    $cert = Get-ResultRow $r.Rows 'esx01.fixture.local' 'CertificateExpiry'
     Assert-That 'host certificate expiry is evaluated, not reported as unavailable' `
         ($cert.Count -eq 1 -and $cert[0].Status -eq 'PASS') "got $($cert.Count) row(s): $($cert.Status) - $($cert.Detail)"
 
     # The managing vCenter used to be parsed out of the host Uid, which breaks
     # for an administrator@vsphere.local style login.
-    $ver = Get-Rows $r.Rows 'esx01.fixture.local' 'VersionVsVCenter'
+    $ver = Get-ResultRow $r.Rows 'esx01.fixture.local' 'VersionVsVCenter'
     Assert-That 'host is matched to its managing vCenter' `
         ($ver.Count -eq 1 -and $ver[0].Status -eq 'PASS') "got: $($ver.Status) - $($ver.Detail)"
 
     # A stale IsoPath on a disconnected drive blocks nothing.
-    $media = Get-Rows $r.Rows 'app01' 'MountedMedia'
+    $media = Get-ResultRow $r.Rows 'app01' 'MountedMedia'
     Assert-That 'disconnected CD drive with a stale ISO is not flagged' ($media.Count -eq 0) `
         "got: $($media.Detail)"
 
     # Reads MemoryTotalGB/MemoryUsageGB; a missing property makes the row vanish.
-    Assert-That 'cluster RAM row is present' ((Get-Rows $r.Rows 'CL-FIXTURE' 'ClusterRAM').Count -eq 1)
+    Assert-That 'cluster RAM row is present' ((Get-ResultRow $r.Rows 'CL-FIXTURE' 'ClusterRAM').Count -eq 1)
     Assert-That 'storage paths are walked' `
-        ((Get-Rows $r.Rows 'esx01.fixture.local' 'PathState')[0].Status -eq 'PASS')
+        ((Get-ResultRow $r.Rows 'esx01.fixture.local' 'PathState')[0].Status -eq 'PASS')
 
     # --- HostDown -----------------------------------------------------------
     Write-Host "`nScenario: HostDown" -ForegroundColor Cyan
@@ -188,27 +188,27 @@ try {
 
     # Exactly HostVersionSkewFailMajors behind is the documented WARN boundary,
     # not FAIL (-lt, not -le).
-    $ver = Get-Rows $r.Rows 'esx01.fixture.local' 'VersionVsVCenter'
+    $ver = Get-ResultRow $r.Rows 'esx01.fixture.local' 'VersionVsVCenter'
     Assert-That 'host exactly N majors behind vCenter is WARN, not FAIL' `
         ($ver.Count -eq 1 -and $ver[0].Status -eq 'WARN') "got: $($ver.Status) - $($ver.Detail)"
 
     # An unparsable value used to fall through to PASS.
-    $hw = Get-Rows $r.Rows 'app01' 'HardwareVersion'
+    $hw = Get-ResultRow $r.Rows 'app01' 'HardwareVersion'
     Assert-That 'unparsable hardware version is INFO, not PASS' `
         ($hw.Count -eq 1 -and $hw[0].Status -eq 'INFO') "got: $($hw.Status) - $($hw.Detail)"
 
     # A failed LUN query used to be reported as "NFS-only host" - a false all-clear.
-    $path = Get-Rows $r.Rows 'esx01.fixture.local' 'PathState'
+    $path = Get-ResultRow $r.Rows 'esx01.fixture.local' 'PathState'
     Assert-That 'failed LUN query is WARN, not a no-block-storage all-clear' `
         ($path.Count -eq 1 -and $path[0].Status -eq 'WARN' -and $path[0].Detail -notmatch 'NFS-only') `
         "got: $($path.Status) - $($path.Detail)"
 
     # An absent advanced setting used to read as "password aging disabled".
-    $pw = Get-Rows $r.Rows 'esx01.fixture.local' 'PasswordExpirationPolicy'
+    $pw = Get-ResultRow $r.Rows 'esx01.fixture.local' 'PasswordExpirationPolicy'
     Assert-That 'absent password setting is INFO, not a false "disabled" WARN' `
         ($pw.Count -eq 1 -and $pw[0].Status -eq 'INFO') "got: $($pw.Status) - $($pw.Detail)"
 
-    $cert = Get-Rows $r.Rows 'esx01.fixture.local' 'CertificateExpiry'
+    $cert = Get-ResultRow $r.Rows 'esx01.fixture.local' 'CertificateExpiry'
     Assert-That 'certificate inside the warning window is WARN' `
         ($cert.Count -eq 1 -and $cert[0].Status -eq 'WARN') "got: $($cert.Status) - $($cert.Detail)"
 
@@ -227,7 +227,7 @@ try {
         @{ Host = 'vcenter-a-esx01.fixture.local'; VC = '8.0.2' }
         @{ Host = 'vcenter-b-esx01.fixture.local'; VC = '7.0.3' }
     )) {
-        $ver = Get-Rows $r.Rows $pair.Host 'VersionVsVCenter'
+        $ver = Get-ResultRow $r.Rows $pair.Host 'VersionVsVCenter'
         Assert-That "$($pair.Host) is paired with its own vCenter ($($pair.VC))" `
             ($ver.Count -eq 1 -and $ver[0].Status -eq 'PASS' -and $ver[0].Detail -match [regex]::Escape($pair.VC)) `
             "got: $($ver.Status) - $($ver.Detail)"

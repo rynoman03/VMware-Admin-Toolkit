@@ -81,3 +81,38 @@ jobs:
           name: test-output-${{ matrix.os }}-${{ matrix.shell }}
           path: ${{ runner.temp }}/healthcheck-tests
           if-no-files-found: ignore
+
+  lint:
+    name: PSScriptAnalyzer
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install PSScriptAnalyzer
+        run: |
+          # Pinned deliberately. A new analyzer release can add rules, and CI
+          # going red because the linter changed rather than because the code
+          # did is a bad trade for a repo this size - bump it on purpose.
+          try { Set-PSRepository -Name PSGallery -InstallationPolicy Trusted } catch { }
+          Install-Module PSScriptAnalyzer -RequiredVersion 1.23.0 -Scope CurrentUser -Force
+          "PSScriptAnalyzer $((Get-Module PSScriptAnalyzer -ListAvailable).Version)"
+
+      - name: Analyze
+        run: |
+          $findings = @(Invoke-ScriptAnalyzer -Path . -Recurse -Settings ./PSScriptAnalyzerSettings.psd1)
+          foreach ($f in $findings) {
+            $level = if ($f.Severity -eq 'Error') { 'error' } else { 'warning' }
+            $rel = (Resolve-Path -LiteralPath $f.ScriptPath -Relative) -replace '^\.[\\/]', ''
+            Write-Host "::$level file=$rel,line=$($f.Line),col=$($f.Column)::[$($f.RuleName)] $($f.Message)"
+          }
+          if ($findings.Count -gt 0) {
+            Write-Host "$($findings.Count) PSScriptAnalyzer finding(s) - see annotations above."
+            exit 1
+          }
+          Write-Host 'PSScriptAnalyzer: clean.'

@@ -59,6 +59,19 @@ Each job also parse-checks every `.ps1` and `.psm1` in the repo, and uploads the
 reports and console logs as an artifact when a job fails, since a failure confined to one
 PowerShell edition is otherwise awkward to reproduce.
 
+A fourth job runs **PSScriptAnalyzer** over the repo at Error and Warning severity, pinned to
+a known version so CI cannot go red because the analyzer changed rather than the code.
+Configuration lives in [`PSScriptAnalyzerSettings.psd1`](../PSScriptAnalyzerSettings.psd1) at
+the repo root, where every exclusion is explained. To run it yourself:
+
+```powershell
+Install-Module PSScriptAnalyzer -Scope CurrentUser
+Invoke-ScriptAnalyzer -Path . -Recurse -Settings ./PSScriptAnalyzerSettings.psd1
+```
+
+Prefer fixing a finding, or suppressing it at the one site with a justified
+`[Diagnostics.CodeAnalysis.SuppressMessageAttribute]`, over adding a repo-wide exclusion.
+
 ## Notes
 
 - No vCenter is contacted, but the health check does attempt a TLS handshake against the

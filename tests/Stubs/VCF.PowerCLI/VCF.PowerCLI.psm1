@@ -31,7 +31,9 @@ function Get-FixtureScenario {
 # PEM bytes in the shape vCenter returns for HostConfigInfo.certificate: a
 # byte[] of PEM text, which is why the health check has to decode it rather
 # than read .NotAfter directly.
-function New-FixtureCertificateBytes {
+function New-FixtureCertificatePem {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '',
+        Justification = 'Builds an in-memory value for the fixture; changes no system state.')]
     param([int] $DaysValid = 300)
 
     $notBefore = [DateTimeOffset]::UtcNow.AddDays(-30)
@@ -62,6 +64,8 @@ function New-FixtureCertificateBytes {
 }
 
 function New-FixtureVMHost {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '',
+        Justification = 'Builds an in-memory object for the fixture; changes no system state.')]
     param(
         [string] $Name,
         [string] $ConnectionState = 'Connected',
@@ -89,7 +93,7 @@ function New-FixtureVMHost {
                 }
             }
             Config  = [pscustomobject]@{
-                Certificate  = New-FixtureCertificateBytes -DaysValid $CertDaysValid
+                Certificate  = New-FixtureCertificatePem -DaysValid $CertDaysValid
                 LockdownMode = 'lockdownNormal'
             }
         }
@@ -97,6 +101,8 @@ function New-FixtureVMHost {
 }
 
 function Set-PowerCLIConfiguration {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSShouldProcess', '',
+        Justification = 'Stub: declares SupportsShouldProcess only so it accepts -Confirm like the real cmdlet does.')]
     [CmdletBinding(SupportsShouldProcess)]
     param($Scope, $InvalidCertificateAction, $ParticipateInCeip)
 }
@@ -114,7 +120,7 @@ function Get-FixtureVCenterVersion {
 
 function Connect-VIServer {
     [CmdletBinding()]
-    param($Server, $Credential)
+    param($Server, [System.Management.Automation.PSCredential] $Credential)
     if ((Get-FixtureScenario) -eq 'ConnectFail') {
         throw 'Cannot complete login due to an incorrect user name or password.'
     }
@@ -123,6 +129,8 @@ function Connect-VIServer {
 }
 
 function Disconnect-VIServer {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSShouldProcess', '',
+        Justification = 'Stub: declares SupportsShouldProcess only so it accepts -Confirm like the real cmdlet does.')]
     [CmdletBinding(SupportsShouldProcess)]
     param($Server)
 }
