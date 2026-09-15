@@ -33,14 +33,44 @@ Everything here is built to be safe, parameterized, and report-driven.
 $cred = Get-Credential
 .\HealthCheck\Invoke-VMwareHealthCheck.ps1 -VCenter vc1,vc2 -Credential $cred `
     -ReportPath C:\Reports -SnapshotAgeWarningDays 7 -DatastoreFreeWarnPercent 25
+
+# Require a valid (non-self-signed) TLS cert chain when connecting
+.\HealthCheck\Invoke-VMwareHealthCheck.ps1 -VCenter vcenter01.corp.local -TrustAllCertificates:$false
 ```
+
+By default, untrusted/self-signed vCenter certificates are accepted so the script
+can connect to typical internal vCenters without extra setup (`-TrustAllCertificates`
+defaults to on). Pass `-TrustAllCertificates:$false` to require a valid chain instead.
+A failed connection to any vCenter is recorded as a `FAIL` in the report itself (not
+just the console), and if every vCenter fails to connect, the run still produces a
+report showing those failures.
 
 The script checks:
 
-- **Host health** — connection state, NTP, syslog, uptime, datastore connectivity, FC/iSCSI storage path state (dead paths, even when a datastore still reads as accessible on its remaining paths), TLS certificate expiry (ESXi hosts and vCenter itself), local account password expiration policy (root included)
+- **Host health** — connection state, NTP, syslog, uptime, datastore connectivity, FC/iSCSI storage path state (dead paths, even when a datastore still reads as accessible on its remaining paths), TLS certificate expiry (ESXi hosts and vCenter itself), local account password expiration policy (root included), ESXi build vs. vCenter build
 - **VM compliance** — VMware Tools, OS system drive free space (`C:\` / `/`), all other guest drives, VM hardware version, mounted ISOs/CD-ROMs, connected floppy drives, snapshot age
 - **Capacity** — datastore free space, cluster CPU/RAM utilization
 - **Cluster config** — HA, admission control, DRS, EVC
+
+**EVC (Enhanced vMotion Compatibility).** `PASS` with the cluster's current EVC mode
+(e.g. `intel-broadwell`) if one is set, `WARN` if `Not configured`. EVC masks each
+host's CPU down to a common baseline instruction set so a running VM can vMotion
+between hosts with different CPU generations without the guest OS seeing the CPU
+change mid-flight — without it, migrating to a host with an older/different feature
+set can crash the guest or vMotion can refuse outright. The script can't tell from
+vCenter alone whether a cluster's hosts actually span multiple CPU generations, but
+`Not configured` is flagged `WARN` anyway (like the other cluster-config checks,
+which also flag things that may be intentional) since enabling EVC is generally
+recommended even for same-generation clusters, as a hedge in case a differing host
+is added later.
+
+**ESXi build vs. vCenter build.** VMware only supports ESXi hosts within roughly two
+major versions behind vCenter, and a host *newer* than vCenter is unsupported outright
+and can break management features. `PASS` when a host's version matches vCenter's
+exactly; `WARN` on a minor version difference; `FAIL` when a host is newer than
+vCenter, or more than `-HostVersionSkewFailMajors` (default 2) major versions behind
+it. No extra vCenter round-trip is needed — the connection object from
+`Connect-VIServer` and each host from `Get-VMHost` already carry `.Version`/`.Build`.
 
 Findings are tagged `PASS` / `WARN` / `FAIL` / `INFO`. The script never modifies configuration.
 
@@ -61,11 +91,11 @@ Add ~10-30s for the initial PowerCLI module import. As long as `PASS`/`WARN` lin
 
 Both carry the columns **Category, Object, Check, Status, Detail**, and are written in a `finally` block — so you still get a report even if the run errors partway through. Pass `-ReportPath C:\Reports` to keep output in a fixed location instead of wherever you launched from.
 
-The **HTML report opens pre-filtered to just `FAIL` + `WARN`** (what needs fixing), with clickable buttons at the top — `Needs attention`, `FAIL`, `WARN`, `INFO`, `PASS`, `All` — each showing a live count, so you can drill straight to the problems instead of scrolling past everything that passed. The summary numbers themselves are clickable too.
+The HTML report uses a **dashboard-style layout** — a dark navy header and left navigation sidebar, a blue accent color, and status pill badges (`PASS`/`WARN`/`FAIL`/`INFO`), similar in feel to a Dell iDRAC or OpenManage console. Color-coded **stat tiles** at the top (Fail / Warn / Info / Pass counts) are clickable and double as the severity filter, alongside the same **`Needs attention`, `FAIL`, `WARN`, `INFO`, `PASS`, `All`** filter buttons — the report opens pre-filtered to `FAIL` + `WARN` (what needs fixing), so you can drill straight to the problems instead of scrolling past everything that passed.
 
-Results are also broken into **per-check sections** (e.g. *VMware Tools*, *Hardware Version*, *Mounted ISOs*, *Snapshots*, *NTP*, *Datastore Free*), each in its own table. A **Contents/appendix at the top** lists every section grouped by category with per-section counts and `FAIL`/`WARN` badges — click an entry to jump straight to that table. Severity filtering and section navigation work together: under a filter, sections with no matching rows are hidden automatically, and clicking a Contents link reveals the target. (The CSV stays complete and unfiltered for trending; open it in Excel and use AutoFilter on the Status column for the same effect.)
+Results are also broken into **per-check sections** (e.g. *VMware Tools*, *Hardware Version*, *Mounted ISOs*, *Snapshots*, *NTP*, *Datastore Free*), each in its own table. The left **sidebar** lists every section grouped by category with per-section counts and `FAIL`/`WARN` badges — click an entry to jump straight to that table. Severity filtering and section navigation work together: under a filter, sections with no matching rows are hidden automatically, and clicking a sidebar link reveals the target. (The CSV stays complete and unfiltered for trending; open it in Excel and use AutoFilter on the Status column for the same effect.)
 
-**Sample report** (fictional lab data):
+**Sample report** (fictional lab data; screenshot predates the current dashboard-style layout):
 
 ![Sample health check HTML report](docs/img/healthcheck-sample.png)
 
@@ -85,6 +115,7 @@ Results are also broken into **per-check sections** (e.g. *VMware Tools*, *Hardw
 - **Report-only by default.** Remediation is opt-in via `-UpdateTools` / `-UpgradeHardware`.
 - Hardware upgrades only run on **powered-off** VMs — powered-on VMs are skipped, never forced off.
 - Both remediation paths support `-WhatIf` and `-Confirm`. Always run with `-WhatIf` first.
+- Untrusted/self-signed vCenter certificates are accepted by default (`-TrustAllCertificates`); pass `-TrustAllCertificates:$false` to require a valid chain.
 
 **Output.** Like the health check, results are written to two timestamped files in `-ReportPath` (**defaults to the current directory**): `VMwareUpdateCompliance-<yyyyMMdd-HHmmss>.html` and `.csv`, both with the columns **Category, Object, Check, Status, Detail**, produced in a `finally` block even if the run errors. Pass `-ReportPath C:\Reports` to fix the location. The HTML report opens pre-filtered to `FAIL` + `WARN` with the same clickable status buttons as the health check.
 
@@ -103,12 +134,13 @@ For every host, compares MTU across three layers per network path and flags wher
 
 - **VMkernel adapter** (`vmk0`, vMotion, storage, etc.) vs. the **standard or distributed vSwitch** it's on
 - That same vSwitch/VDS vs. the **MTU reported by the physically connected switch port** (via CDP)
+- Untrusted/self-signed vCenter certificates are accepted by default (`-TrustAllCertificates`); pass `-TrustAllCertificates:$false` to require a valid chain.
 
 If CDP is disabled, or the connected switch only speaks LLDP, the CDP-vs-switch checks report `INFO` instead of guessing at a `PASS`/`FAIL`. Findings are tagged `PASS` / `WARN` / `FAIL` / `INFO`; the script never modifies configuration.
 
 **Output.** Like the other reports, results are written to two timestamped files in `-ReportPath` (**defaults to the current directory**): `VMwareMtuConsistencyCheck-<yyyyMMdd-HHmmss>.html` and `.csv`, both with the columns **Category, Object, Check, Status, Detail**, produced in a `finally` block even if the run errors. The HTML report opens pre-filtered to `FAIL` + `WARN` with the same clickable status buttons and per-check sections as the health check.
 
-**Sample report** (fictional lab data):
+**Sample report** (fictional lab data; screenshot predates the current dashboard-style layout):
 
 ![Sample MTU consistency check HTML report](docs/img/mtu-consistency-check-sample.png)
 

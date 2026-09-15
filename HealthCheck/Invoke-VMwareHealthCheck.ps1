@@ -4,7 +4,7 @@
 
 .DESCRIPTION
     Connects to one or more vCenter Servers and evaluates four areas:
-        1. Host health     - connection state, NTP, syslog, uptime, datastore connectivity, storage path state, TLS certificate expiry (hosts + vCenter), local account password expiration policy
+        1. Host health     - connection state, NTP, syslog, uptime, datastore connectivity, storage path state, TLS certificate expiry (hosts + vCenter), local account password expiration policy, ESXi build vs vCenter build
         2. VM compliance   - VMware Tools, VM hardware version, mounted ISOs, floppy drives, snapshot age
         3. Capacity        - datastore free space, cluster CPU/RAM utilization
         4. Cluster config  - HA / DRS / admission control
@@ -51,6 +51,18 @@
 
 .PARAMETER HardwareVersionWarnNum
     VM hardware versions below this number (vmx-NN) are flagged as old. Default 13.
+
+.PARAMETER HostVersionSkewFailMajors
+    An ESXi host running more than this many major versions behind its
+    vCenter is FAIL (outside VMware's supported interop range). A host
+    newer than vCenter is always FAIL regardless of this value, since that's
+    unsupported outright. Default 2.
+
+.PARAMETER TrustAllCertificates
+    Whether to ignore untrusted/self-signed vCenter TLS certificates when
+    connecting (PowerCLI's InvalidCertificateAction). Default $true, since
+    many vCenters run on internal or self-signed certs. Pass
+    -TrustAllCertificates:$false to require a valid chain instead.
 
 .EXAMPLE
     .\Invoke-VMwareHealthCheck.ps1 -VCenter vcenter01.corp.local
@@ -99,7 +111,9 @@ param(
     [int] $DataDriveFreeWarnGB      = 10,
     [int] $HardwareVersionWarnNum   = 13,
     [int] $CertExpiryWarnDays       = 30,
-    [int] $CertExpiryCritDays       = 7
+    [int] $CertExpiryCritDays       = 7,
+    [int] $HostVersionSkewFailMajors = 2,
+    [switch] $TrustAllCertificates  = $true
 )
 
 #region --- Setup -------------------------------------------------------------
@@ -144,30 +158,37 @@ if (-not $pcliModule) {
 }
 Import-Module $pcliModule -ErrorAction Stop | Out-Null
 
-# Don't prompt about the CEIP / invalid certs interactively during an unattended run
-Set-PowerCLIConfiguration -Scope Session -InvalidCertificateAction Ignore -ParticipateInCeip $false -Confirm:$false | Out-Null
+# Don't prompt about the CEIP / invalid certs interactively during an unattended run.
+# -TrustAllCertificates (default on) ignores untrusted/self-signed vCenter certs;
+# pass -TrustAllCertificates:$false to require a valid chain instead.
+$certAction = if ($TrustAllCertificates) { 'Ignore' } else { 'Fail' }
+Set-PowerCLIConfiguration -Scope Session -InvalidCertificateAction $certAction -ParticipateInCeip $false -Confirm:$false | Out-Null
 
 #endregion
 
-#region --- Connect -----------------------------------------------------------
-
-Write-Host "`nConnecting to vCenter(s): $($VCenter -join ', ')" -ForegroundColor Cyan
 $connections = @()
-foreach ($vc in $VCenter) {
-    try {
-        $params = @{ Server = $vc; ErrorAction = 'Stop' }
-        if ($Credential) { $params.Credential = $Credential }
-        $connections += Connect-VIServer @params
-        Write-Host "  Connected to $vc" -ForegroundColor Green
-    } catch {
-        Write-Host "  FAILED to connect to $vc : $($_.Exception.Message)" -ForegroundColor Red
-    }
-}
-if (-not $connections) { throw "No vCenter connections established. Aborting." }
-
-#endregion
 
 try {
+    #region --- Connect -------------------------------------------------------
+    # Kept inside the try so a connection failure still lands in the HTML/CSV
+    # report (via Add-Result below) instead of only the console, and so the
+    # finally block still runs (and produces a report) even if every
+    # connection fails.
+    Write-Host "`nConnecting to vCenter(s): $($VCenter -join ', ')" -ForegroundColor Cyan
+    foreach ($vc in $VCenter) {
+        try {
+            $params = @{ Server = $vc; ErrorAction = 'Stop' }
+            if ($Credential) { $params.Credential = $Credential }
+            $connections += Connect-VIServer @params
+            Write-Host "  Connected to $vc" -ForegroundColor Green
+        } catch {
+            Write-Host "  FAILED to connect to $vc : $($_.Exception.Message)" -ForegroundColor Red
+            Add-Result 'Connection' $vc 'Connect' 'FAIL' "Could not connect: $($_.Exception.Message)"
+        }
+    }
+    if (-not $connections) { throw "No vCenter connections established. Aborting." }
+    #endregion
+
     #region --- 1. Host health -----------------------------------------------
     Write-Host "`n=== Host Health ===" -ForegroundColor Cyan
 
@@ -203,7 +224,15 @@ try {
         }
     }
 
-    $vmHosts = Get-VMHost
+    # Explicit -Server so this always spans every connected vCenter,
+    # regardless of the session's DefaultVIServerMode setting.
+    $vmHosts = Get-VMHost -Server $connections
+
+    # vCenter version/build per connection, keyed by server name, for comparing
+    # against each host below. Connect-VIServer's connection object already
+    # carries .Version/.Build - no extra API call needed.
+    $vcInfoByServer = @{}
+    foreach ($conn in $connections) { $vcInfoByServer[$conn.Name.ToLowerInvariant()] = $conn }
 
     foreach ($h in $vmHosts) {
         # Connection / power state
@@ -211,6 +240,44 @@ try {
             Add-Result 'HostHealth' $h.Name 'ConnectionState' 'FAIL' "State is $($h.ConnectionState)"
         } else {
             Add-Result 'HostHealth' $h.Name 'ConnectionState' 'PASS' 'Connected'
+        }
+
+        # ESXi build vs vCenter build. VMware only supports ESXi hosts within
+        # roughly N-2 major versions of vCenter, and a host *newer* than
+        # vCenter is unsupported outright and can break management features.
+        # Match the host to its managing vCenter via its Uid
+        # (/VIServer=user@server:port/VMHost=.../), same pattern already used
+        # for VM/snapshot matching below; fall back to the sole connection
+        # when there's only one, in case Uid parsing ever fails.
+        $hostServer = $null
+        if ($h.Uid -match '@([^:/]+)') { $hostServer = $Matches[1].ToLowerInvariant() }
+        $vcConn = if ($hostServer -and $vcInfoByServer.ContainsKey($hostServer)) {
+            $vcInfoByServer[$hostServer]
+        } elseif ($connections.Count -eq 1) {
+            $connections[0]
+        } else {
+            $null
+        }
+
+        if (-not $vcConn) {
+            Add-Result 'HostHealth' $h.Name 'VersionVsVCenter' 'INFO' "Could not determine which connected vCenter manages this host; skipped"
+        } else {
+            $hostMajor = 0; $hostMinor = 0
+            if ($h.Version -match '^(\d+)\.(\d+)') { $hostMajor = [int]$Matches[1]; $hostMinor = [int]$Matches[2] }
+            $vcMajor = 0; $vcMinor = 0
+            if ($vcConn.Version -match '^(\d+)\.(\d+)') { $vcMajor = [int]$Matches[1]; $vcMinor = [int]$Matches[2] }
+
+            if ($hostMajor -eq 0 -or $vcMajor -eq 0) {
+                Add-Result 'HostHealth' $h.Name 'VersionVsVCenter' 'INFO' "Could not parse version (host $($h.Version)/$($h.Build), vCenter $($vcConn.Version)/$($vcConn.Build))"
+            } elseif ($hostMajor -gt $vcMajor -or ($hostMajor -eq $vcMajor -and $hostMinor -gt $vcMinor)) {
+                Add-Result 'HostHealth' $h.Name 'VersionVsVCenter' 'FAIL' "ESXi $($h.Version) build $($h.Build) is NEWER than vCenter $($vcConn.Version) build $($vcConn.Build) - unsupported, management features may break"
+            } elseif ($hostMajor -le ($vcMajor - $HostVersionSkewFailMajors)) {
+                Add-Result 'HostHealth' $h.Name 'VersionVsVCenter' 'FAIL' "ESXi $($h.Version) is $($vcMajor - $hostMajor) major version(s) behind vCenter $($vcConn.Version) - outside VMware's supported interop range"
+            } elseif ($h.Version -ne $vcConn.Version) {
+                Add-Result 'HostHealth' $h.Name 'VersionVsVCenter' 'WARN' "ESXi $($h.Version) build $($h.Build) differs from vCenter $($vcConn.Version) build $($vcConn.Build)"
+            } else {
+                Add-Result 'HostHealth' $h.Name 'VersionVsVCenter' 'PASS' "ESXi $($h.Version) build $($h.Build) matches vCenter $($vcConn.Version) build $($vcConn.Build)"
+            }
         }
 
         # NTP - configured and the daemon running
@@ -311,7 +378,7 @@ try {
 
     #region --- 2. VM compliance ---------------------------------------------
     Write-Host "`n=== VM Compliance ===" -ForegroundColor Cyan
-    $vms = Get-VM
+    $vms = Get-VM -Server $connections
 
     # Pre-fetch snapshots, CD drives and floppy drives for ALL VMs in one
     # round-trip each, rather than calling Get-Snapshot / Get-CDDrive /
@@ -434,7 +501,7 @@ try {
     Write-Host "`n=== Capacity ===" -ForegroundColor Cyan
 
     # Datastore free space
-    foreach ($ds in (Get-Datastore)) {
+    foreach ($ds in (Get-Datastore -Server $connections)) {
         if ($ds.CapacityGB -le 0) { continue }
         $freePct = [math]::Round(($ds.FreeSpaceGB / $ds.CapacityGB) * 100, 1)
         $detail  = "$freePct% free ($([math]::Round($ds.FreeSpaceGB))GB / $([math]::Round($ds.CapacityGB))GB)"
@@ -448,7 +515,7 @@ try {
     }
 
     # Cluster CPU / RAM utilization
-    foreach ($cl in (Get-Cluster)) {
+    foreach ($cl in (Get-Cluster -Server $connections)) {
         $hostsInCl = $cl | Get-VMHost
         $totalCpuMhz = ($hostsInCl | Measure-Object -Property CpuTotalMhz -Sum).Sum
         $usedCpuMhz  = ($hostsInCl | Measure-Object -Property CpuUsageMhz -Sum).Sum
@@ -470,7 +537,7 @@ try {
 
     #region --- 4. Cluster config --------------------------------------------
     Write-Host "`n=== Cluster Config ===" -ForegroundColor Cyan
-    foreach ($cl in (Get-Cluster)) {
+    foreach ($cl in (Get-Cluster -Server $connections)) {
         # HA
         if ($cl.HAEnabled) {
             Add-Result 'ClusterConfig' $cl.Name 'HA' 'PASS' 'HA enabled'
@@ -503,10 +570,29 @@ try {
         if ($cl.HAEnabled -and $hostCount -lt 2) {
             Add-Result 'ClusterConfig' $cl.Name 'HostCount' 'WARN' "Only $hostCount host(s) - HA cannot fail over"
         }
+        # EVC masks host CPUs to a common baseline so a running VM can vMotion
+        # between different CPU generations without the guest seeing the CPU
+        # change mid-flight. We can't tell from vCenter alone whether this
+        # cluster's hosts actually span multiple CPU generations, so flag
+        # "not configured" as WARN (consistent with the other cluster-config
+        # checks below, which also flag things that may be intentional) rather
+        # than staying silent - it's generally recommended as a hedge even for
+        # same-generation clusters, in case a differing host is added later.
         $evc = $cl.ExtensionData.Summary.CurrentEVCModeKey
-        Add-Result 'ClusterConfig' $cl.Name 'EVC' 'INFO' ($(if ($evc) { $evc } else { 'Not configured' }))
+        if ($evc) {
+            Add-Result 'ClusterConfig' $cl.Name 'EVC' 'PASS' $evc
+        } else {
+            Add-Result 'ClusterConfig' $cl.Name 'EVC' 'WARN' 'Not configured - if hosts have mixed CPU generations, or a differing one is added later, vMotion may fail; consider enabling EVC as a hedge'
+        }
     }
     #endregion
+}
+catch {
+    # Log a clean one-line message, then rethrow so the run still surfaces as
+    # a failure to the caller/scheduler. The finally block below still runs
+    # first and writes whatever results were collected before the error.
+    Write-Host "`nRun failed: $($_.Exception.Message)" -ForegroundColor Red
+    throw
 }
 finally {
     #region --- Report + disconnect ------------------------------------------
@@ -517,45 +603,83 @@ finally {
     $stamp     = Get-Date -Format 'yyyyMMdd-HHmmss'
     $htmlFile  = Join-Path $ReportPath "VMwareHealthCheck-$stamp.html"
 
+    # Styled after a Dell iDRAC-style dashboard: dark navy header/sidebar, a
+    # blue accent, status pill badges, and a stat-tile summary row instead of
+    # a plain text line.
     $style = @"
 <style>
- body { font-family: Segoe UI, Arial, sans-serif; margin: 20px; background: #ffffff; color: #1a1a1a; }
- h1 { color: #333; }
- h2 { color: #2d3e50; margin-top: 30px; border-bottom: 2px solid #e1e4e8; padding-bottom: 4px; }
- table { border-collapse: collapse; width: 100%; margin-top: 6px; }
- th, td { border: 1px solid #ddd; padding: 6px 10px; text-align: left; font-size: 13px; }
- th { background: #2d3e50; color: #fff; }
- tr:nth-child(even) { background: #f6f8fa; }
- .PASS { color: #1a7f37; font-weight: bold; }
- .WARN { color: #b88600; font-weight: bold; }
- .FAIL { color: #cf222e; font-weight: bold; }
- .INFO { color: #57606a; }
- .filters { margin: 16px 0; }
- .filters button { font: inherit; font-size: 13px; padding: 6px 12px; margin: 0 6px 6px 0; border: 1px solid #ccc; border-radius: 4px; background: #fff; cursor: pointer; }
- .filters button:hover { border-color: #2d3e50; }
- .filters button.active { background: #2d3e50; color: #fff; border-color: #2d3e50; }
+ :root {
+  --navy: #0b1f33; --navy-2: #123252; --accent: #045a9e;
+  --bg: #eef1f5; --surface: #ffffff; --border: #dbe1e8;
+  --text: #1c2733; --muted: #64748b;
+  --ok: #1e7c34; --ok-bg: #e6f4ea;
+  --warn: #96650b; --warn-bg: #fff4e0;
+  --crit: #a61b1b; --crit-bg: #fdeaea;
+  --info: #51606f; --info-bg: #eef1f4;
+ }
+ * { box-sizing: border-box; }
+ body { font-family: Segoe UI, Arial, sans-serif; margin: 0; background: var(--bg); color: var(--text); }
+ a { color: var(--accent); }
+ .topbar { background: linear-gradient(180deg, var(--navy) 0%, var(--navy-2) 100%); color: #fff; padding: 14px 24px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+ .topbar-brand { display: flex; align-items: center; gap: 12px; }
+ .brand-badge { display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 34px; border-radius: 6px; background: var(--accent); color: #fff; font-weight: 700; font-size: 13px; letter-spacing: .5px; flex: none; }
+ .brand-title { font-size: 18px; font-weight: 600; }
+ .topbar-meta { font-size: 12px; color: #c7d2df; }
+ .layout { display: flex; align-items: flex-start; }
+ .sidebar { width: 270px; flex: 0 0 270px; background: var(--navy); color: #dbe6f0; padding: 18px 0; position: sticky; top: 0; align-self: flex-start; max-height: 100vh; overflow-y: auto; }
+ .sidebar h3 { margin: 0 18px 10px; font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: #8fa3ba; }
+ .sidebar .toc-cat { margin: 0 0 14px; }
+ .sidebar .toc-cat-name { display: block; padding: 6px 18px; font-weight: 600; font-size: 12px; color: #a9bdd2; text-transform: uppercase; letter-spacing: .04em; }
+ .sidebar ul { list-style: none; margin: 4px 0 0; padding: 0; }
+ .sidebar li { margin: 0; }
+ .sidebar a { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 6px 18px; font-size: 13px; color: #dbe6f0; text-decoration: none; border-left: 3px solid transparent; cursor: pointer; }
+ .sidebar a:hover { background: var(--navy-2); border-left-color: var(--accent); }
+ .sidebar .muted { color: #7c93ab; font-size: 11px; }
+ .content { flex: 1; min-width: 0; padding: 24px; }
+ .meta-line { color: var(--muted); font-size: 13px; margin: 0 0 16px; }
+ .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 18px; }
+ .stat-tile { background: var(--surface); border: 1px solid var(--border); border-left: 4px solid var(--muted); border-radius: 8px; padding: 14px 16px; cursor: pointer; text-align: left; font: inherit; }
+ .stat-tile .stat-num { display: block; font-size: 26px; font-weight: 700; line-height: 1.1; }
+ .stat-tile .stat-label { display: block; font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; margin-top: 2px; }
+ .stat-tile.stat-FAIL { border-left-color: var(--crit); }
+ .stat-tile.stat-FAIL .stat-num { color: var(--crit); }
+ .stat-tile.stat-WARN { border-left-color: var(--warn); }
+ .stat-tile.stat-WARN .stat-num { color: var(--warn); }
+ .stat-tile.stat-INFO { border-left-color: var(--info); }
+ .stat-tile.stat-INFO .stat-num { color: var(--info); }
+ .stat-tile.stat-PASS { border-left-color: var(--ok); }
+ .stat-tile.stat-PASS .stat-num { color: var(--ok); }
+ .stat-tile.active { box-shadow: 0 0 0 2px var(--accent) inset; }
+ .filters { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 20px; }
+ .filters button { font: inherit; font-size: 13px; padding: 7px 14px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); color: var(--text); cursor: pointer; }
+ .filters button:hover { border-color: var(--accent); color: var(--accent); }
+ .filters button.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+ h2 { color: var(--navy); margin: 28px 0 4px; padding-left: 10px; border-left: 4px solid var(--accent); font-size: 16px; }
+ table { border-collapse: collapse; width: 100%; margin-top: 6px; background: var(--surface); border-radius: 6px; overflow: hidden; box-shadow: 0 1px 2px rgba(16,24,40,.05); }
+ th, td { border-bottom: 1px solid var(--border); padding: 8px 12px; text-align: left; font-size: 13px; }
+ th { background: var(--navy); color: #fff; font-weight: 600; }
+ tr:hover td { background: #f5f8fb; }
+ .badge { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 11px; font-weight: 700; letter-spacing: .03em; }
+ .badge-PASS { background: var(--ok-bg); color: var(--ok); }
+ .badge-WARN { background: var(--warn-bg); color: var(--warn); }
+ .badge-FAIL { background: var(--crit-bg); color: var(--crit); }
+ .badge-INFO { background: var(--info-bg); color: var(--info); }
  tr.hidden, h2.hidden, table.hidden { display: none; }
- #emptyNote { color: #57606a; font-style: italic; margin: 12px 0; display: none; }
- .sumlink { cursor: pointer; text-decoration: underline; }
- .toc { background: #f6f8fa; border: 1px solid #e1e4e8; border-radius: 6px; padding: 12px 18px; margin: 16px 0; }
- .toc h3 { margin: 0 0 8px; color: #2d3e50; font-size: 15px; }
- .toc-cat { margin: 8px 0; }
- .toc-cat-name { font-weight: bold; color: #555; }
- .toc ul { margin: 4px 0 0; padding-left: 18px; columns: 2; }
- .toc li { margin: 2px 0; list-style: square; }
- .toc a { color: #0969da; text-decoration: none; cursor: pointer; }
- .toc a:hover { text-decoration: underline; }
+ #emptyNote { color: var(--muted); font-style: italic; margin: 12px 0; display: none; }
  .b { font-size: 11px; font-weight: bold; padding: 0 5px; border-radius: 8px; margin-left: 4px; }
- .bFAIL { background: #ffebe9; color: #cf222e; }
- .bWARN { background: #fff8c5; color: #7d4e00; }
- .muted { color: #8b949e; font-size: 12px; }
- .seccount { color: #8b949e; font-weight: normal; font-size: 13px; }
- .backtop { font-size: 12px; margin-left: 10px; font-weight: normal; }
+ .bFAIL { background: var(--crit-bg); color: var(--crit); }
+ .bWARN { background: var(--warn-bg); color: var(--warn); }
+ .seccount { color: var(--muted); font-weight: normal; font-size: 13px; }
+ .backtop { font-size: 12px; margin-left: 10px; font-weight: normal; color: var(--accent); text-decoration: none; }
+ @media (max-width: 820px) {
+  .layout { flex-direction: column; }
+  .sidebar { width: 100%; flex-basis: auto; position: static; max-height: none; }
+ }
 </style>
 "@
 
-    # Per-status counts for the filter buttons. @() guards the PowerShell
-    # quirk where a single matching object has no usable .Count.
+    # Per-status counts for the stat tiles and filter buttons. @() guards the
+    # PowerShell quirk where a single matching object has no usable .Count.
     $cFail = @($script:Results | Where-Object { $_.Status -eq 'FAIL' }).Count
     $cWarn = @($script:Results | Where-Object { $_.Status -eq 'WARN' }).Count
     $cInfo = @($script:Results | Where-Object { $_.Status -eq 'INFO' }).Count
@@ -564,11 +688,6 @@ finally {
     # $script:Results is a List[object]; read .Count directly. Wrapping it as
     # @($script:Results).Count throws "Argument types do not match" in WinPS 5.1.
     $cAll  = $script:Results.Count
-
-    # Clickable, color-coded summary tokens (e.g. FAIL=57) wired to the same filter
-    $summaryHtml = (($script:Results | Group-Object Status | ForEach-Object {
-        "<span class='sumlink $($_.Name)' data-filter='$($_.Name)'>$($_.Name)=$($_.Count)</span>"
-    }) -join ' &nbsp; ')
 
     # Group results into per-check sections (Category + Check), preserving
     # first-seen order. Each becomes its own anchored table, navigable from the
@@ -608,7 +727,7 @@ finally {
     $bodyHtml = foreach ($sec in $sections) {
         $secRows = ($sec.Rows | ForEach-Object {
             "<tr data-status='$($_.Status)'><td>$([System.Net.WebUtility]::HtmlEncode([string]$_.Object))</td>" +
-            "<td class='$($_.Status)'>$($_.Status)</td><td>$([System.Net.WebUtility]::HtmlEncode([string]$_.Detail))</td></tr>"
+            "<td><span class='badge badge-$($_.Status)'>$($_.Status)</span></td><td>$([System.Net.WebUtility]::HtmlEncode([string]$_.Detail))</td></tr>"
         }) -join "`n"
         @"
 <h2 id="$($sec.Id)" data-section="$($sec.Id)">$($sec.Cat) &rsaquo; $($sec.Check) <span class="seccount">($($sec.Rows.Count))</span> <a class="backtop" href="#top">&uarr; top</a></h2>
@@ -622,27 +741,39 @@ $secRows
     $html = @"
 <!DOCTYPE html><html><head><meta charset='utf-8'>$style
 <title>VMware Health Check $stamp</title></head><body>
-<a id="top"></a>
-<h1>VMware Health &amp; Compliance Report</h1>
-<p>Generated: $(Get-Date)<br>vCenter(s): $($VCenter -join ', ')<br>
-Summary: $summaryHtml &nbsp; <span style='color:#57606a'>(click a number or button to filter)</span></p>
-<div class="filters">
- <button data-filter="attention" class="active">Needs attention &mdash; FAIL + WARN ($cAttn)</button>
- <button data-filter="FAIL">FAIL ($cFail)</button>
- <button data-filter="WARN">WARN ($cWarn)</button>
- <button data-filter="INFO">INFO ($cInfo)</button>
- <button data-filter="PASS">PASS ($cPass)</button>
- <button data-filter="all">All ($cAll)</button>
+<header class="topbar">
+ <div class="topbar-brand"><span class="brand-badge">HC</span><span class="brand-title">VMware Health &amp; Compliance Report</span></div>
+ <div class="topbar-meta">Generated $(Get-Date) &nbsp;&bull;&nbsp; vCenter(s): $($VCenter -join ', ')</div>
+</header>
+<div class="layout">
+ <nav class="sidebar">
+  <h3>Contents</h3>
+  $tocHtml
+ </nav>
+ <main class="content">
+  <a id="top"></a>
+  <div class="stats">
+   <button class="stat-tile stat-FAIL" data-filter="FAIL"><span class="stat-num">$cFail</span><span class="stat-label">Fail</span></button>
+   <button class="stat-tile stat-WARN" data-filter="WARN"><span class="stat-num">$cWarn</span><span class="stat-label">Warn</span></button>
+   <button class="stat-tile stat-INFO" data-filter="INFO"><span class="stat-num">$cInfo</span><span class="stat-label">Info</span></button>
+   <button class="stat-tile stat-PASS" data-filter="PASS"><span class="stat-num">$cPass</span><span class="stat-label">Pass</span></button>
+  </div>
+  <div class="filters">
+   <button data-filter="attention" class="active">Needs attention &mdash; FAIL + WARN ($cAttn)</button>
+   <button data-filter="FAIL">FAIL ($cFail)</button>
+   <button data-filter="WARN">WARN ($cWarn)</button>
+   <button data-filter="INFO">INFO ($cInfo)</button>
+   <button data-filter="PASS">PASS ($cPass)</button>
+   <button data-filter="all">All ($cAll)</button>
+  </div>
+  <p id="emptyNote">Nothing matches this filter.</p>
+  $bodyHtml
+ </main>
 </div>
-<div class="toc">
- <h3>Contents &mdash; jump to a section</h3>
- $tocHtml
-</div>
-<p id="emptyNote">Nothing matches this filter.</p>
-$bodyHtml
 <script>
 (function(){
  var buttons = document.querySelectorAll('.filters button');
+ var tiles = document.querySelectorAll('.stat-tile');
  var rows = document.querySelectorAll('table tr[data-status]');
  var note = document.getElementById('emptyNote');
  var tables = document.querySelectorAll('[data-section-table]');
@@ -664,11 +795,12 @@ $bodyHtml
    if (show) visible++;
   });
   buttons.forEach(function(b){ b.classList.toggle('active', b.getAttribute('data-filter') === filter); });
+  tiles.forEach(function(t){ t.classList.toggle('active', t.getAttribute('data-filter') === filter); });
   refreshSections();
   note.style.display = visible ? 'none' : 'block';
  }
  buttons.forEach(function(b){ b.addEventListener('click', function(){ apply(b.getAttribute('data-filter')); }); });
- document.querySelectorAll('.sumlink').forEach(function(s){ s.addEventListener('click', function(){ apply(s.getAttribute('data-filter')); }); });
+ tiles.forEach(function(t){ t.addEventListener('click', function(){ apply(t.getAttribute('data-filter')); }); });
  document.querySelectorAll('[data-jump]').forEach(function(a){
   a.addEventListener('click', function(e){
    e.preventDefault();
