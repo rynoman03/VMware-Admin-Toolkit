@@ -92,6 +92,23 @@
     Both share the columns Category, Object, Check, Status, Detail, and
     are written in a finally block so they are produced even if the run
     errors partway through. Pass -ReportPath to control where they land.
+
+    Exit codes, so a scheduler or monitoring wrapper can act on the outcome
+    without parsing the report:
+      0  run completed, no FAIL results
+      2  run completed, one or more FAIL results
+      1  the script itself errored (PowerShell's own exit code for a
+         terminating error under `pwsh -File` / `powershell -File`)
+    WARN and INFO results do not affect the exit code. 1 is kept distinct
+    from 2 on purpose: "the health check found problems" and "the health
+    check could not run" usually need different responses. The reports are
+    written before the exit code is set, so they exist in every case.
+
+    Use -File to get these codes:
+      pwsh -File .\Invoke-VMwareHealthCheck.ps1 -VCenter vcenter01
+    Under -Command, PowerShell collapses any non-zero script exit to 1
+    unless you propagate it yourself:
+      pwsh -Command "& .\Invoke-VMwareHealthCheck.ps1 -VCenter vcenter01; exit $LASTEXITCODE\"
 #>
 
 [CmdletBinding()]
@@ -946,3 +963,16 @@ $secRows
     if ($connections) { Disconnect-VIServer -Server $connections -Confirm:$false -ErrorAction SilentlyContinue }
     #endregion
 }
+
+#region --- Exit code ---------------------------------------------------------
+# Runs only on a completed run: the catch block above rethrows, so a failed run
+# never reaches here and PowerShell sets exit code 1 for the terminating error.
+# The finally block has already written the HTML and CSV reports by this point.
+# See .NOTES for the full table.
+$failCount = @($script:Results | Where-Object { $_.Status -eq 'FAIL' }).Count
+if ($failCount -gt 0) {
+    Write-Host "Exiting with code 2 - $failCount FAIL result(s)." -ForegroundColor Red
+    exit 2
+}
+exit 0
+#endregion
