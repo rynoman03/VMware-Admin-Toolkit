@@ -519,8 +519,20 @@ try {
         if ($cl.HAEnabled -and $hostCount -lt 2) {
             Add-Result 'ClusterConfig' $cl.Name 'HostCount' 'WARN' "Only $hostCount host(s) - HA cannot fail over"
         }
+        # EVC masks host CPUs to a common baseline so a running VM can vMotion
+        # between different CPU generations without the guest seeing the CPU
+        # change mid-flight. We can't tell from vCenter alone whether this
+        # cluster's hosts actually span multiple CPU generations, so flag
+        # "not configured" as WARN (consistent with the other cluster-config
+        # checks below, which also flag things that may be intentional) rather
+        # than staying silent - it's generally recommended as a hedge even for
+        # same-generation clusters, in case a differing host is added later.
         $evc = $cl.ExtensionData.Summary.CurrentEVCModeKey
-        Add-Result 'ClusterConfig' $cl.Name 'EVC' 'INFO' ($(if ($evc) { $evc } else { 'Not configured' }))
+        if ($evc) {
+            Add-Result 'ClusterConfig' $cl.Name 'EVC' 'PASS' $evc
+        } else {
+            Add-Result 'ClusterConfig' $cl.Name 'EVC' 'WARN' 'Not configured - if hosts have mixed CPU generations, or a differing one is added later, vMotion may fail; consider enabling EVC as a hedge'
+        }
     }
     #endregion
 }
