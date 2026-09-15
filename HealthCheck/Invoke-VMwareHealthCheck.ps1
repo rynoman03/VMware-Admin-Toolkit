@@ -4,7 +4,7 @@
 
 .DESCRIPTION
     Connects to one or more vCenter Servers and evaluates four areas:
-        1. Host health     - connection state, NTP, syslog, uptime, datastore connectivity, storage path state, TLS certificate expiry (hosts + vCenter), local account password expiration policy
+        1. Host health     - connection state, NTP, syslog, uptime, datastore connectivity, storage path state, TLS certificate expiry (hosts + vCenter), local account password expiration policy, ESXi build vs vCenter build
         2. VM compliance   - VMware Tools, VM hardware version, mounted ISOs, floppy drives, snapshot age
         3. Capacity        - datastore free space, cluster CPU/RAM utilization
         4. Cluster config  - HA / DRS / admission control
@@ -51,6 +51,12 @@
 
 .PARAMETER HardwareVersionWarnNum
     VM hardware versions below this number (vmx-NN) are flagged as old. Default 13.
+
+.PARAMETER HostVersionSkewFailMajors
+    An ESXi host running more than this many major versions behind its
+    vCenter is FAIL (outside VMware's supported interop range). A host
+    newer than vCenter is always FAIL regardless of this value, since that's
+    unsupported outright. Default 2.
 
 .PARAMETER TrustAllCertificates
     Whether to ignore untrusted/self-signed vCenter TLS certificates when
@@ -106,6 +112,7 @@ param(
     [int] $HardwareVersionWarnNum   = 13,
     [int] $CertExpiryWarnDays       = 30,
     [int] $CertExpiryCritDays       = 7,
+    [int] $HostVersionSkewFailMajors = 2,
     [switch] $TrustAllCertificates  = $true
 )
 
@@ -221,12 +228,56 @@ try {
     # regardless of the session's DefaultVIServerMode setting.
     $vmHosts = Get-VMHost -Server $connections
 
+    # vCenter version/build per connection, keyed by server name, for comparing
+    # against each host below. Connect-VIServer's connection object already
+    # carries .Version/.Build - no extra API call needed.
+    $vcInfoByServer = @{}
+    foreach ($conn in $connections) { $vcInfoByServer[$conn.Name.ToLowerInvariant()] = $conn }
+
     foreach ($h in $vmHosts) {
         # Connection / power state
         if ($h.ConnectionState -ne 'Connected') {
             Add-Result 'HostHealth' $h.Name 'ConnectionState' 'FAIL' "State is $($h.ConnectionState)"
         } else {
             Add-Result 'HostHealth' $h.Name 'ConnectionState' 'PASS' 'Connected'
+        }
+
+        # ESXi build vs vCenter build. VMware only supports ESXi hosts within
+        # roughly N-2 major versions of vCenter, and a host *newer* than
+        # vCenter is unsupported outright and can break management features.
+        # Match the host to its managing vCenter via its Uid
+        # (/VIServer=user@server:port/VMHost=.../), same pattern already used
+        # for VM/snapshot matching below; fall back to the sole connection
+        # when there's only one, in case Uid parsing ever fails.
+        $hostServer = $null
+        if ($h.Uid -match '@([^:/]+)') { $hostServer = $Matches[1].ToLowerInvariant() }
+        $vcConn = if ($hostServer -and $vcInfoByServer.ContainsKey($hostServer)) {
+            $vcInfoByServer[$hostServer]
+        } elseif ($connections.Count -eq 1) {
+            $connections[0]
+        } else {
+            $null
+        }
+
+        if (-not $vcConn) {
+            Add-Result 'HostHealth' $h.Name 'VersionVsVCenter' 'INFO' "Could not determine which connected vCenter manages this host; skipped"
+        } else {
+            $hostMajor = 0; $hostMinor = 0
+            if ($h.Version -match '^(\d+)\.(\d+)') { $hostMajor = [int]$Matches[1]; $hostMinor = [int]$Matches[2] }
+            $vcMajor = 0; $vcMinor = 0
+            if ($vcConn.Version -match '^(\d+)\.(\d+)') { $vcMajor = [int]$Matches[1]; $vcMinor = [int]$Matches[2] }
+
+            if ($hostMajor -eq 0 -or $vcMajor -eq 0) {
+                Add-Result 'HostHealth' $h.Name 'VersionVsVCenter' 'INFO' "Could not parse version (host $($h.Version)/$($h.Build), vCenter $($vcConn.Version)/$($vcConn.Build))"
+            } elseif ($hostMajor -gt $vcMajor -or ($hostMajor -eq $vcMajor -and $hostMinor -gt $vcMinor)) {
+                Add-Result 'HostHealth' $h.Name 'VersionVsVCenter' 'FAIL' "ESXi $($h.Version) build $($h.Build) is NEWER than vCenter $($vcConn.Version) build $($vcConn.Build) - unsupported, management features may break"
+            } elseif ($hostMajor -le ($vcMajor - $HostVersionSkewFailMajors)) {
+                Add-Result 'HostHealth' $h.Name 'VersionVsVCenter' 'FAIL' "ESXi $($h.Version) is $($vcMajor - $hostMajor) major version(s) behind vCenter $($vcConn.Version) - outside VMware's supported interop range"
+            } elseif ($h.Version -ne $vcConn.Version) {
+                Add-Result 'HostHealth' $h.Name 'VersionVsVCenter' 'WARN' "ESXi $($h.Version) build $($h.Build) differs from vCenter $($vcConn.Version) build $($vcConn.Build)"
+            } else {
+                Add-Result 'HostHealth' $h.Name 'VersionVsVCenter' 'PASS' "ESXi $($h.Version) build $($h.Build) matches vCenter $($vcConn.Version) build $($vcConn.Build)"
+            }
         }
 
         # NTP - configured and the daemon running

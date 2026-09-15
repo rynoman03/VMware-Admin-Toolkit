@@ -47,7 +47,7 @@ report showing those failures.
 
 The script checks:
 
-- **Host health** — connection state, NTP, syslog, uptime, datastore connectivity, FC/iSCSI storage path state (dead paths, even when a datastore still reads as accessible on its remaining paths), TLS certificate expiry (ESXi hosts and vCenter itself), local account password expiration policy (root included)
+- **Host health** — connection state, NTP, syslog, uptime, datastore connectivity, FC/iSCSI storage path state (dead paths, even when a datastore still reads as accessible on its remaining paths), TLS certificate expiry (ESXi hosts and vCenter itself), local account password expiration policy (root included), ESXi build vs. vCenter build
 - **VM compliance** — VMware Tools, OS system drive free space (`C:\` / `/`), all other guest drives, VM hardware version, mounted ISOs/CD-ROMs, connected floppy drives, snapshot age
 - **Capacity** — datastore free space, cluster CPU/RAM utilization
 - **Cluster config** — HA, admission control, DRS, EVC
@@ -63,6 +63,14 @@ vCenter alone whether a cluster's hosts actually span multiple CPU generations, 
 which also flag things that may be intentional) since enabling EVC is generally
 recommended even for same-generation clusters, as a hedge in case a differing host
 is added later.
+
+**ESXi build vs. vCenter build.** VMware only supports ESXi hosts within roughly two
+major versions behind vCenter, and a host *newer* than vCenter is unsupported outright
+and can break management features. `PASS` when a host's version matches vCenter's
+exactly; `WARN` on a minor version difference; `FAIL` when a host is newer than
+vCenter, or more than `-HostVersionSkewFailMajors` (default 2) major versions behind
+it. No extra vCenter round-trip is needed — the connection object from
+`Connect-VIServer` and each host from `Get-VMHost` already carry `.Version`/`.Build`.
 
 Findings are tagged `PASS` / `WARN` / `FAIL` / `INFO`. The script never modifies configuration.
 
