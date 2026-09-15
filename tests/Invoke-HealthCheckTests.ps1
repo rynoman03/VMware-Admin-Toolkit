@@ -75,7 +75,11 @@ function Assert-That {
 
 function Get-Rows {
     param($Rows, [string] $Object, [string] $Check)
-    @($Rows | Where-Object { $_.Object -eq $Object -and $_.Check -eq $Check })
+    # The leading comma matters. Returning @(...) from a function unrolls a
+    # single-element array back to a scalar, and in Windows PowerShell 5.1 a
+    # lone [pscustomobject] has no .Count - every "exactly one row" assertion
+    # below would compare $null against 1 and fail. Wrapping keeps it an array.
+    , @($Rows | Where-Object { $_.Object -eq $Object -and $_.Check -eq $Check })
 }
 
 function Invoke-Scenario {
@@ -86,8 +90,14 @@ function Invoke-Scenario {
     $log = Join-Path $dir 'console.log'
 
     $savedModulePath = $env:PSModulePath
+    $savedEap        = $ErrorActionPreference
     $env:PSModulePath = $stubRoot + [System.IO.Path]::PathSeparator + $savedModulePath
     $env:HEALTHCHECK_FIXTURE_SCENARIO = $Scenario
+    # Windows PowerShell turns anything a native command writes to stderr into
+    # an error record, which the Stop preference above makes terminating. The
+    # ConnectFail scenario writes to stderr by design, so that would abort the
+    # runner instead of letting the scenario's exit code be asserted on.
+    $ErrorActionPreference = 'Continue'
     try {
         if ($VCenter.Count -gt 1) {
             # -File passes arguments as plain strings, so a list has to go
@@ -102,7 +112,8 @@ function Invoke-Scenario {
         }
         $code = $LASTEXITCODE
     } finally {
-        $env:PSModulePath = $savedModulePath
+        $env:PSModulePath      = $savedModulePath
+        $ErrorActionPreference = $savedEap
         Remove-Item Env:\HEALTHCHECK_FIXTURE_SCENARIO -ErrorAction SilentlyContinue
     }
 
