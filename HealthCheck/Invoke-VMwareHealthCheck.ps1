@@ -164,6 +164,15 @@ Import-Module $pcliModule -ErrorAction Stop | Out-Null
 $certAction = if ($TrustAllCertificates) { 'Ignore' } else { 'Fail' }
 Set-PowerCLIConfiguration -Scope Session -InvalidCertificateAction $certAction -ParticipateInCeip $false -Confirm:$false | Out-Null
 
+# Create and resolve the report folder up front. The finally block writes into
+# it at the end of what can be a 10+ minute run; a bad path or a permissions
+# problem discovered there loses every result, and the New-Item failure inside
+# finally would also mask the original error. Fail here instead, before any work.
+if (-not (Test-Path -LiteralPath $ReportPath)) {
+    New-Item -ItemType Directory -Path $ReportPath -Force -ErrorAction Stop | Out-Null
+}
+$ReportPath = (Resolve-Path -LiteralPath $ReportPath).Path
+
 #endregion
 
 $connections = @()
@@ -200,7 +209,12 @@ try {
         $sslStream = $null
         try {
             $tcpClient = New-Object System.Net.Sockets.TcpClient
-            $tcpClient.Connect($vc, 443)
+            # Connect with an explicit timeout. The blocking Connect() overload
+            # waits on the OS TCP timeout (~21s on Windows) for an unreachable
+            # vCenter, stalling an unattended run once per bad -VCenter entry.
+            if (-not $tcpClient.ConnectAsync($vc, 443).Wait(5000)) {
+                throw "Timed out connecting to ${vc}:443 after 5s"
+            }
             $validation = { param($tlsSender, $tlsCertificate, $tlsChain, $tlsPolicyErrors) $true }
             $sslStream = New-Object System.Net.Security.SslStream($tcpClient.GetStream(), $false, $validation)
             $sslStream.AuthenticateAsClient($vc)
@@ -219,70 +233,74 @@ try {
         } catch {
             Add-Result 'HostHealth' $vc 'CertificateExpiry' 'WARN' "Could not retrieve vCenter certificate: $($_.Exception.Message)"
         } finally {
+            # Close(), not Dispose(): on .NET Framework (Windows PowerShell 5.1)
+            # these types implement IDisposable explicitly, so a .Dispose() call
+            # from PowerShell fails with a method-not-found error.
             if ($sslStream) { $sslStream.Close() }
             if ($tcpClient) { $tcpClient.Close() }
         }
     }
 
-    # Explicit -Server so this always spans every connected vCenter,
-    # regardless of the session's DefaultVIServerMode setting.
-    $vmHosts = Get-VMHost -Server $connections
+    # Enumerate hosts one connection at a time, rather than handing every
+    # connection to a single Get-VMHost, so each host is paired with the
+    # vCenter that manages it by construction. Deriving that from the host's
+    # .Uid is unreliable: an SSO login such as administrator@vsphere.local puts
+    # a second '@' in the Uid, so the managing server can't be picked out of it
+    # with a simple match. Connect-VIServer's connection object already carries
+    # .Version/.Build, so the comparison below needs no extra API call.
+    $hostEntries = New-Object System.Collections.Generic.List[object]
+    foreach ($conn in $connections) {
+        foreach ($h in (Get-VMHost -Server $conn)) {
+            $hostEntries.Add([pscustomobject]@{ VMHost = $h; VCenter = $conn })
+        }
+    }
 
-    # vCenter version/build per connection, keyed by server name, for comparing
-    # against each host below. Connect-VIServer's connection object already
-    # carries .Version/.Build - no extra API call needed.
-    $vcInfoByServer = @{}
-    foreach ($conn in $connections) { $vcInfoByServer[$conn.Name.ToLowerInvariant()] = $conn }
+    foreach ($entry in $hostEntries) {
+        $h      = $entry.VMHost
+        $vcConn = $entry.VCenter
 
-    foreach ($h in $vmHosts) {
         # Connection / power state
         if ($h.ConnectionState -ne 'Connected') {
-            Add-Result 'HostHealth' $h.Name 'ConnectionState' 'FAIL' "State is $($h.ConnectionState)"
-        } else {
-            Add-Result 'HostHealth' $h.Name 'ConnectionState' 'PASS' 'Connected'
+            # Every check below queries the host itself, which vCenter can't
+            # reach in this state: the cmdlets emit raw errors that never reach
+            # the report, and properties such as Runtime.BootTime come back
+            # null. Record the state and move on to the next host.
+            Add-Result 'HostHealth' $h.Name 'ConnectionState' 'FAIL' "State is $($h.ConnectionState) - remaining host checks skipped"
+            continue
         }
+        Add-Result 'HostHealth' $h.Name 'ConnectionState' 'PASS' 'Connected'
 
         # ESXi build vs vCenter build. VMware only supports ESXi hosts within
         # roughly N-2 major versions of vCenter, and a host *newer* than
         # vCenter is unsupported outright and can break management features.
-        # Match the host to its managing vCenter via its Uid
-        # (/VIServer=user@server:port/VMHost=.../), same pattern already used
-        # for VM/snapshot matching below; fall back to the sole connection
-        # when there's only one, in case Uid parsing ever fails.
-        $hostServer = $null
-        if ($h.Uid -match '@([^:/]+)') { $hostServer = $Matches[1].ToLowerInvariant() }
-        $vcConn = if ($hostServer -and $vcInfoByServer.ContainsKey($hostServer)) {
-            $vcInfoByServer[$hostServer]
-        } elseif ($connections.Count -eq 1) {
-            $connections[0]
+        # $vcConn came from the enumeration above, so it is always the vCenter
+        # this host is actually registered to.
+        $hostMajor = 0; $hostMinor = 0
+        if ($h.Version -match '^(\d+)\.(\d+)') { $hostMajor = [int]$Matches[1]; $hostMinor = [int]$Matches[2] }
+        $vcMajor = 0; $vcMinor = 0
+        if ($vcConn.Version -match '^(\d+)\.(\d+)') { $vcMajor = [int]$Matches[1]; $vcMinor = [int]$Matches[2] }
+
+        if ($hostMajor -eq 0 -or $vcMajor -eq 0) {
+            Add-Result 'HostHealth' $h.Name 'VersionVsVCenter' 'INFO' "Could not parse version (host $($h.Version)/$($h.Build), vCenter $($vcConn.Version)/$($vcConn.Build))"
+        } elseif ($hostMajor -gt $vcMajor -or ($hostMajor -eq $vcMajor -and $hostMinor -gt $vcMinor)) {
+            Add-Result 'HostHealth' $h.Name 'VersionVsVCenter' 'FAIL' "ESXi $($h.Version) build $($h.Build) is NEWER than vCenter $($vcConn.Version) build $($vcConn.Build) - unsupported, management features may break"
+        } elseif ($hostMajor -lt ($vcMajor - $HostVersionSkewFailMajors)) {
+            # -lt, not -le: the parameter is documented as "*more than* this
+            # many major versions behind", so a host exactly N behind is the
+            # WARN case, not FAIL.
+            Add-Result 'HostHealth' $h.Name 'VersionVsVCenter' 'FAIL' "ESXi $($h.Version) is $($vcMajor - $hostMajor) major version(s) behind vCenter $($vcConn.Version) - outside VMware's supported interop range"
+        } elseif ($h.Version -ne $vcConn.Version) {
+            Add-Result 'HostHealth' $h.Name 'VersionVsVCenter' 'WARN' "ESXi $($h.Version) build $($h.Build) differs from vCenter $($vcConn.Version) build $($vcConn.Build)"
         } else {
-            $null
+            Add-Result 'HostHealth' $h.Name 'VersionVsVCenter' 'PASS' "ESXi $($h.Version) build $($h.Build) matches vCenter $($vcConn.Version) build $($vcConn.Build)"
         }
 
-        if (-not $vcConn) {
-            Add-Result 'HostHealth' $h.Name 'VersionVsVCenter' 'INFO' "Could not determine which connected vCenter manages this host; skipped"
-        } else {
-            $hostMajor = 0; $hostMinor = 0
-            if ($h.Version -match '^(\d+)\.(\d+)') { $hostMajor = [int]$Matches[1]; $hostMinor = [int]$Matches[2] }
-            $vcMajor = 0; $vcMinor = 0
-            if ($vcConn.Version -match '^(\d+)\.(\d+)') { $vcMajor = [int]$Matches[1]; $vcMinor = [int]$Matches[2] }
-
-            if ($hostMajor -eq 0 -or $vcMajor -eq 0) {
-                Add-Result 'HostHealth' $h.Name 'VersionVsVCenter' 'INFO' "Could not parse version (host $($h.Version)/$($h.Build), vCenter $($vcConn.Version)/$($vcConn.Build))"
-            } elseif ($hostMajor -gt $vcMajor -or ($hostMajor -eq $vcMajor -and $hostMinor -gt $vcMinor)) {
-                Add-Result 'HostHealth' $h.Name 'VersionVsVCenter' 'FAIL' "ESXi $($h.Version) build $($h.Build) is NEWER than vCenter $($vcConn.Version) build $($vcConn.Build) - unsupported, management features may break"
-            } elseif ($hostMajor -le ($vcMajor - $HostVersionSkewFailMajors)) {
-                Add-Result 'HostHealth' $h.Name 'VersionVsVCenter' 'FAIL' "ESXi $($h.Version) is $($vcMajor - $hostMajor) major version(s) behind vCenter $($vcConn.Version) - outside VMware's supported interop range"
-            } elseif ($h.Version -ne $vcConn.Version) {
-                Add-Result 'HostHealth' $h.Name 'VersionVsVCenter' 'WARN' "ESXi $($h.Version) build $($h.Build) differs from vCenter $($vcConn.Version) build $($vcConn.Build)"
-            } else {
-                Add-Result 'HostHealth' $h.Name 'VersionVsVCenter' 'PASS' "ESXi $($h.Version) build $($h.Build) matches vCenter $($vcConn.Version) build $($vcConn.Build)"
-            }
-        }
+        # Host services, fetched once and shared with the SSH check below.
+        $hostServices = @($h | Get-VMHostService)
 
         # NTP - configured and the daemon running
         $ntpServers = ($h | Get-VMHostNtpServer)
-        $ntpSvc     = $h | Get-VMHostService | Where-Object { $_.Key -eq 'ntpd' }
+        $ntpSvc     = $hostServices | Where-Object { $_.Key -eq 'ntpd' }
         if (-not $ntpServers) {
             Add-Result 'HostHealth' $h.Name 'NTP' 'FAIL' 'No NTP servers configured'
         } elseif (-not $ntpSvc.Running) {
@@ -315,12 +333,18 @@ try {
         # paths while one or more of its FC/iSCSI paths are dead, silently
         # running with reduced (or zero) redundancy. DatastoreConnectivity
         # above won't catch that; this walks the actual multipathing state.
-        $luns = @($h | Get-ScsiLun -LunType disk -ErrorAction SilentlyContinue)
+        $lunQueryError = $null
+        $luns = @($h | Get-ScsiLun -LunType disk -ErrorAction SilentlyContinue -ErrorVariable lunQueryError)
         $pathIssues  = New-Object System.Collections.Generic.List[object]
         $totalPaths  = 0
         $anyLunDown  = $false
         foreach ($lun in $luns) {
             $paths  = @(Get-ScsiLunPath -ScsiLun $lun -ErrorAction SilentlyContinue)
+            if ($paths.Count -eq 0) {
+                # Don't let a LUN whose paths can't be read count as healthy.
+                $pathIssues.Add("$($lun.CanonicalName): path state unavailable")
+                continue
+            }
             $totalPaths += $paths.Count
             $dead   = @($paths | Where-Object { $_.State -in @('Dead','Disabled') })
             $active = @($paths | Where-Object { $_.State -notin @('Dead','Disabled') })
@@ -337,12 +361,40 @@ try {
             Add-Result 'HostHealth' $h.Name 'PathState' $severity ($pathIssues -join '; ')
         } elseif ($luns.Count -gt 0) {
             Add-Result 'HostHealth' $h.Name 'PathState' 'PASS' "$totalPaths path(s) across $($luns.Count) LUN(s), all active"
+        } elseif ($lunQueryError) {
+            # An empty result because the query failed is not the same as a host
+            # with no block storage; saying "NFS-only" here would be a false all-clear.
+            Add-Result 'HostHealth' $h.Name 'PathState' 'WARN' "Could not enumerate block storage LUNs: $($lunQueryError[0].Exception.Message)"
         } else {
             Add-Result 'HostHealth' $h.Name 'PathState' 'INFO' 'No block storage LUNs found (e.g. NFS-only host)'
         }
 
-        # ESXi host TLS certificate expiry
-        $hostCert = $h.ExtensionData.Config.Certificate
+        # ESXi host TLS certificate expiry. Config.Certificate is a byte[] of
+        # the PEM-encoded certificate, not a certificate object, so reading
+        # .NotAfter off it directly always yields $null - it has to be decoded
+        # first. X509Certificate2 accepts PEM bytes only on .NET 5+ (PowerShell
+        # 7), so pull the base64 body out and hand it DER, which Windows
+        # PowerShell 5.1 accepts too.
+        $hostCert  = $null
+        $certError = $null
+        try {
+            $certBytes = $h.ExtensionData.Config.Certificate
+            if ($certBytes) {
+                $certText = [System.Text.Encoding]::ASCII.GetString([byte[]]$certBytes)
+                # Declared [byte[]] deliberately: assigning from an if/else
+                # expression unrolls the array into object[], and the ctor then
+                # binds to the (string fileName) overload instead of (byte[]).
+                [byte[]] $der = $null
+                if ($certText -match '(?s)-----BEGIN CERTIFICATE-----(.*?)-----END CERTIFICATE-----') {
+                    $der = [System.Convert]::FromBase64String(($Matches[1] -replace '\s', ''))
+                } else {
+                    $der = [byte[]]$certBytes   # already DER
+                }
+                $hostCert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($der)
+            }
+        } catch {
+            $certError = $_.Exception.Message
+        }
         if ($hostCert -and $hostCert.NotAfter) {
             $daysLeft = [math]::Round((New-TimeSpan -Start (Get-Date) -End $hostCert.NotAfter).TotalDays, 1)
             if ($daysLeft -lt 0) {
@@ -354,6 +406,8 @@ try {
             } else {
                 Add-Result 'HostHealth' $h.Name 'CertificateExpiry' 'PASS' "Valid until $($hostCert.NotAfter) ($daysLeft days)"
             }
+        } elseif ($certError) {
+            Add-Result 'HostHealth' $h.Name 'CertificateExpiry' 'WARN' "Could not read host certificate: $certError"
         } else {
             Add-Result 'HostHealth' $h.Name 'CertificateExpiry' 'INFO' 'Certificate info not available from vCenter'
         }
@@ -363,12 +417,22 @@ try {
         # only in the host's local shadow file and would require SSH + `chage -l
         # root` to read. This checks whether password aging is enabled at all.
         try {
-            $pwExpSetting = $h | Get-AdvancedSetting -Name 'Security.PasswordExpirationInDays' -ErrorAction Stop
-            $pwExpDays = [int]$pwExpSetting.Value
-            if ($pwExpDays -le 0) {
-                Add-Result 'HostHealth' $h.Name 'PasswordExpirationPolicy' 'WARN' 'Security.PasswordExpirationInDays is 0 (disabled) - local account passwords, including root, never expire'
+            # A name that doesn't exist comes back as no output (or a null)
+            # rather than an error, and [int]$null is 0 - which would be
+            # reported below as "aging disabled" for a host we actually know
+            # nothing about. Filter the nulls out before counting: @($null)
+            # still has a Count of 1.
+            $pwExpSetting = @($h | Get-AdvancedSetting -Name 'Security.PasswordExpirationInDays' -ErrorAction Stop |
+                              Where-Object { $null -ne $_ -and $null -ne $_.Value })
+            if ($pwExpSetting.Count -ne 1) {
+                Add-Result 'HostHealth' $h.Name 'PasswordExpirationPolicy' 'INFO' 'Security.PasswordExpirationInDays not reported by this host'
             } else {
-                Add-Result 'HostHealth' $h.Name 'PasswordExpirationPolicy' 'PASS' "Security.PasswordExpirationInDays = $pwExpDays (root's actual remaining days isn't exposed by the vCenter API; requires SSH to check directly)"
+                $pwExpDays = [int]$pwExpSetting[0].Value
+                if ($pwExpDays -le 0) {
+                    Add-Result 'HostHealth' $h.Name 'PasswordExpirationPolicy' 'WARN' 'Security.PasswordExpirationInDays is 0 (disabled) - local account passwords, including root, never expire'
+                } else {
+                    Add-Result 'HostHealth' $h.Name 'PasswordExpirationPolicy' 'PASS' "Security.PasswordExpirationInDays = $pwExpDays (root's actual remaining days isn't exposed by the vCenter API; requires SSH to check directly)"
+                }
             }
         } catch {
             Add-Result 'HostHealth' $h.Name 'PasswordExpirationPolicy' 'INFO' "Could not read Security.PasswordExpirationInDays: $($_.Exception.Message)"
@@ -387,7 +451,7 @@ try {
 
         # SSH (TSM-SSH) service - often enabled temporarily for troubleshooting
         # and then forgotten; left running long-term it's extra attack surface.
-        $sshSvc = $h | Get-VMHostService | Where-Object { $_.Key -eq 'TSM-SSH' }
+        $sshSvc = $hostServices | Where-Object { $_.Key -eq 'TSM-SSH' }
         if (-not $sshSvc) {
             Add-Result 'HostHealth' $h.Name 'SSHEnabled' 'INFO' 'Could not read SSH (TSM-SSH) service state'
         } elseif ($sshSvc.Running) {
@@ -495,18 +559,30 @@ try {
             }
         }
 
-        # VM hardware version (vmx-NN). Flag noticeably old ones.
+        # VM hardware version (vmx-NN). Flag noticeably old ones. PowerCLI has
+        # reported this property as both 'vmx-19' and a bare '19' across
+        # releases, so accept either - and report a value that matches neither
+        # as INFO rather than letting it fall through to PASS unexamined.
         $hwVersion = $vm.HardwareVersion
         $hwNum = 0
-        if ($hwVersion -match 'vmx-(\d+)') { $hwNum = [int]$Matches[1] }
-        if ($hwNum -gt 0 -and $hwNum -lt $HardwareVersionWarnNum) {
+        if ($hwVersion -match '(?:vmx-)?(\d+)$') { $hwNum = [int]$Matches[1] }
+        if ($hwNum -le 0) {
+            Add-Result 'VMCompliance' $vm.Name 'HardwareVersion' 'INFO' "Could not parse hardware version '$hwVersion'"
+        } elseif ($hwNum -lt $HardwareVersionWarnNum) {
             Add-Result 'VMCompliance' $vm.Name 'HardwareVersion' 'WARN' "$hwVersion (consider upgrading)"
         } else {
             Add-Result 'VMCompliance' $vm.Name 'HardwareVersion' 'PASS' "$hwVersion"
         }
 
-        # Mounted ISO / connected CD-ROM (blocks vMotion, often left behind)
-        $mounted = $cdByVm[$vm.Uid] | Where-Object { $_.IsoPath -or $_.HostDevice -or $_.RemoteDevice }
+        # Mounted ISO / connected CD-ROM (blocks vMotion, often left behind).
+        # Only a connected drive (or one set to connect at power-on) matters: a
+        # stale IsoPath on a disconnected drive blocks nothing, and flagging it
+        # buries the report in noise anywhere VMs are deployed from ISO. Same
+        # test as the floppy check below.
+        $mounted = $cdByVm[$vm.Uid] | Where-Object {
+            ($_.IsoPath -or $_.HostDevice -or $_.RemoteDevice) -and
+            ($_.ConnectionState.Connected -or $_.ConnectionState.StartConnected)
+        }
         if ($mounted) {
             $what = ($mounted | ForEach-Object { if ($_.IsoPath) { $_.IsoPath } else { 'host/remote device' } }) -join ','
             Add-Result 'VMCompliance' $vm.Name 'MountedMedia' 'WARN' "Connected media: $what"
@@ -561,16 +637,19 @@ try {
         $hostsInCl = $cl | Get-VMHost
         $totalCpuMhz = ($hostsInCl | Measure-Object -Property CpuTotalMhz -Sum).Sum
         $usedCpuMhz  = ($hostsInCl | Measure-Object -Property CpuUsageMhz -Sum).Sum
-        $totalMemMB  = ($hostsInCl | Measure-Object -Property MemoryTotalMB -Sum).Sum
-        $usedMemMB   = ($hostsInCl | Measure-Object -Property MemoryUsageMB -Sum).Sum
+        # The GB properties are the current ones on VMHost; the MB pair is
+        # legacy and, where it is absent, Measure-Object returns a null Sum and
+        # the ClusterRAM row silently vanishes from the report instead of erroring.
+        $totalMemGB  = ($hostsInCl | Measure-Object -Property MemoryTotalGB -Sum).Sum
+        $usedMemGB   = ($hostsInCl | Measure-Object -Property MemoryUsageGB -Sum).Sum
 
         if ($totalCpuMhz -gt 0) {
             $cpuPct = [math]::Round(($usedCpuMhz / $totalCpuMhz) * 100, 1)
             $status = if ($cpuPct -ge $ClusterUsageWarnPercent) { 'WARN' } else { 'PASS' }
             Add-Result 'Capacity' $cl.Name 'ClusterCPU' $status "$cpuPct% used"
         }
-        if ($totalMemMB -gt 0) {
-            $memPct = [math]::Round(($usedMemMB / $totalMemMB) * 100, 1)
+        if ($totalMemGB -gt 0) {
+            $memPct = [math]::Round(($usedMemGB / $totalMemGB) * 100, 1)
             $status = if ($memPct -ge $ClusterUsageWarnPercent) { 'WARN' } else { 'PASS' }
             Add-Result 'Capacity' $cl.Name 'ClusterRAM' $status "$memPct% used"
         }
@@ -641,7 +720,7 @@ finally {
     $summary = $script:Results | Group-Object Status | ForEach-Object { "$($_.Name)=$($_.Count)" }
     Write-Host "`n=== Summary: $($summary -join '  ') ===" -ForegroundColor Cyan
 
-    if (-not (Test-Path $ReportPath)) { New-Item -ItemType Directory -Path $ReportPath -Force | Out-Null }
+    # $ReportPath was created and resolved during setup, before the run started.
     $stamp     = Get-Date -Format 'yyyyMMdd-HHmmss'
     $htmlFile  = Join-Path $ReportPath "VMwareHealthCheck-$stamp.html"
 
@@ -785,7 +864,7 @@ $secRows
 <title>VMware Health Check $stamp</title></head><body>
 <header class="topbar">
  <div class="topbar-brand"><span class="brand-badge">HC</span><span class="brand-title">VMware Health &amp; Compliance Report</span></div>
- <div class="topbar-meta">Generated $(Get-Date) &nbsp;&bull;&nbsp; vCenter(s): $($VCenter -join ', ')</div>
+ <div class="topbar-meta">Generated $(Get-Date) &nbsp;&bull;&nbsp; vCenter(s): $([System.Net.WebUtility]::HtmlEncode($VCenter -join ', '))</div>
 </header>
 <div class="layout">
  <nav class="sidebar">
