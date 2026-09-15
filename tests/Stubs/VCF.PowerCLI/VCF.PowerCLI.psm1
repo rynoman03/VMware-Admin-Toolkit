@@ -33,15 +33,31 @@ function Get-FixtureScenario {
 # than read .NotAfter directly.
 function New-FixtureCertificateBytes {
     param([int] $DaysValid = 300)
-    $rsa = [System.Security.Cryptography.RSA]::Create(2048)
-    $req = [System.Security.Cryptography.X509Certificates.CertificateRequest]::new(
-        'CN=esx.fixture.local', $rsa,
-        [System.Security.Cryptography.HashAlgorithmName]::SHA256,
-        [System.Security.Cryptography.RSASignaturePadding]::Pkcs1)
-    $cert = $req.CreateSelfSigned([DateTimeOffset]::UtcNow.AddDays(-30), [DateTimeOffset]::UtcNow.AddDays($DaysValid))
-    $pem  = "-----BEGIN CERTIFICATE-----`n" +
-            [Convert]::ToBase64String($cert.RawData, 'InsertLineBreaks') +
-            "`n-----END CERTIFICATE-----`n"
+
+    $notBefore = [DateTimeOffset]::UtcNow.AddDays(-30)
+    $notAfter  = [DateTimeOffset]::UtcNow.AddDays($DaysValid)
+
+    # CertificateRequest needs .NET Framework 4.7.2+ (or .NET Core). Where it
+    # is missing, on an older Windows PowerShell host, fall back to the PKI
+    # module so the fixture still works.
+    if ('System.Security.Cryptography.X509Certificates.CertificateRequest' -as [type]) {
+        $rsa = [System.Security.Cryptography.RSA]::Create(2048)
+        $req = [System.Security.Cryptography.X509Certificates.CertificateRequest]::new(
+            'CN=esx.fixture.local', $rsa,
+            [System.Security.Cryptography.HashAlgorithmName]::SHA256,
+            [System.Security.Cryptography.RSASignaturePadding]::Pkcs1)
+        $raw = $req.CreateSelfSigned($notBefore, $notAfter).RawData
+    } else {
+        $made = New-SelfSignedCertificate -Subject 'CN=esx.fixture.local' `
+            -CertStoreLocation 'Cert:\CurrentUser\My' `
+            -NotBefore $notBefore.LocalDateTime -NotAfter $notAfter.LocalDateTime
+        $raw = $made.RawData
+        Remove-Item -Path "Cert:\CurrentUser\My\$($made.Thumbprint)" -Force -ErrorAction SilentlyContinue
+    }
+
+    $pem = "-----BEGIN CERTIFICATE-----`n" +
+           [Convert]::ToBase64String($raw, 'InsertLineBreaks') +
+           "`n-----END CERTIFICATE-----`n"
     [System.Text.Encoding]::ASCII.GetBytes($pem)
 }
 

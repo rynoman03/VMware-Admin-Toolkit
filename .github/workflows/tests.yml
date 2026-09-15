@@ -1,0 +1,80 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  healthcheck:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+
+    strategy:
+      # Report every platform's result, not just the first failure - a break
+      # confined to one PowerShell edition is the interesting case.
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux / PowerShell 7
+            os: ubuntu-latest
+            shell: pwsh
+          - name: Windows / PowerShell 7
+            os: windows-latest
+            shell: pwsh
+          # The scripts support Windows PowerShell 5.1, and parts of the health
+          # check are written specifically for it (DER rather than PEM bytes for
+          # the host certificate, .Close() rather than .Dispose() on sockets).
+          # That edition only exists here, so this is the job that checks it.
+          - name: Windows / Windows PowerShell 5.1
+            os: windows-latest
+            shell: powershell
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: PowerShell version
+        shell: ${{ matrix.shell }}
+        run: $PSVersionTable
+
+      - name: Parse-check every script
+        shell: ${{ matrix.shell }}
+        run: |
+          $bad = $false
+          Get-ChildItem -Path . -Recurse -File |
+            Where-Object { $_.Extension -in '.ps1', '.psm1' } |
+            ForEach-Object {
+              $errors = $null
+              [void][System.Management.Automation.Language.Parser]::ParseFile(
+                $_.FullName, [ref] $null, [ref] $errors)
+              if ($errors) {
+                $bad = $true
+                foreach ($e in $errors) {
+                  Write-Host "::error file=$($_.FullName),line=$($e.Extent.StartLineNumber)::$($e.Message)"
+                }
+              } else {
+                Write-Host "  ok  $($_.FullName)"
+              }
+            }
+          if ($bad) { exit 1 }
+
+      - name: Run health check tests
+        shell: ${{ matrix.shell }}
+        run: |
+          # Windows only: on Linux this throws a terminating
+          # PlatformNotSupportedException that -ErrorAction cannot suppress.
+          try { Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force } catch { }
+          ./tests/Invoke-HealthCheckTests.ps1 -WorkPath "${{ runner.temp }}/healthcheck-tests" -KeepOutput
+
+      - name: Upload reports and logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-output-${{ matrix.os }}-${{ matrix.shell }}
+          path: ${{ runner.temp }}/healthcheck-tests
+          if-no-files-found: ignore

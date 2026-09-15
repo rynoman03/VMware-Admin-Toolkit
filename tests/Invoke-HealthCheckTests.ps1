@@ -43,6 +43,14 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# Two scenarios expect the health check to exit non-zero. Where PowerShell is
+# configured to treat a non-zero native exit code as a terminating error
+# (PSNativeCommandUseErrorActionPreference, combined with the Stop preference
+# above), that would throw inside the runner instead of being asserted on.
+if (Test-Path -LiteralPath 'variable:PSNativeCommandUseErrorActionPreference') {
+    $PSNativeCommandUseErrorActionPreference = $false
+}
+
 $stubRoot   = Join-Path $PSScriptRoot 'Stubs'
 $vcName     = 'vcenter.fixture.invalid'
 $pwshExe    = (Get-Process -Id $PID).Path

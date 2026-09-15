@@ -44,6 +44,21 @@ those fixes, 14 of the 27 assertions fail.
 connection; with a single vCenter the old code's fallback masked it, so a single-vCenter
 fixture would have passed while the bug was live.
 
+## CI
+
+[`.github/workflows/tests.yml`](../.github/workflows/tests.yml) runs this suite on every push
+to `main` and every pull request, across three platforms:
+
+| Job | Why |
+|---|---|
+| Linux / PowerShell 7 | fast baseline |
+| Windows / PowerShell 7 | the platform most of these scripts actually run on |
+| Windows / Windows PowerShell 5.1 | the edition the scripts support but that nothing else exercises — parts of the health check are written specifically for it |
+
+Each job also parse-checks every `.ps1` and `.psm1` in the repo, and uploads the generated
+reports and console logs as an artifact when a job fails, since a failure confined to one
+PowerShell edition is otherwise awkward to reproduce.
+
 ## Notes
 
 - No vCenter is contacted, but the health check does attempt a TLS handshake against the
