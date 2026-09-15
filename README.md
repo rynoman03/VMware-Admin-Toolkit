@@ -33,7 +33,17 @@ Everything here is built to be safe, parameterized, and report-driven.
 $cred = Get-Credential
 .\HealthCheck\Invoke-VMwareHealthCheck.ps1 -VCenter vc1,vc2 -Credential $cred `
     -ReportPath C:\Reports -SnapshotAgeWarningDays 7 -DatastoreFreeWarnPercent 25
+
+# Require a valid (non-self-signed) TLS cert chain when connecting
+.\HealthCheck\Invoke-VMwareHealthCheck.ps1 -VCenter vcenter01.corp.local -TrustAllCertificates:$false
 ```
+
+By default, untrusted/self-signed vCenter certificates are accepted so the script
+can connect to typical internal vCenters without extra setup (`-TrustAllCertificates`
+defaults to on). Pass `-TrustAllCertificates:$false` to require a valid chain instead.
+A failed connection to any vCenter is recorded as a `FAIL` in the report itself (not
+just the console), and if every vCenter fails to connect, the run still produces a
+report showing those failures.
 
 The script checks:
 

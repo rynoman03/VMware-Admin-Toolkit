@@ -52,6 +52,12 @@
 .PARAMETER HardwareVersionWarnNum
     VM hardware versions below this number (vmx-NN) are flagged as old. Default 13.
 
+.PARAMETER TrustAllCertificates
+    Whether to ignore untrusted/self-signed vCenter TLS certificates when
+    connecting (PowerCLI's InvalidCertificateAction). Default $true, since
+    many vCenters run on internal or self-signed certs. Pass
+    -TrustAllCertificates:$false to require a valid chain instead.
+
 .EXAMPLE
     .\Invoke-VMwareHealthCheck.ps1 -VCenter vcenter01.corp.local
 
@@ -99,7 +105,8 @@ param(
     [int] $DataDriveFreeWarnGB      = 10,
     [int] $HardwareVersionWarnNum   = 13,
     [int] $CertExpiryWarnDays       = 30,
-    [int] $CertExpiryCritDays       = 7
+    [int] $CertExpiryCritDays       = 7,
+    [switch] $TrustAllCertificates  = $true
 )
 
 #region --- Setup -------------------------------------------------------------
@@ -144,30 +151,37 @@ if (-not $pcliModule) {
 }
 Import-Module $pcliModule -ErrorAction Stop | Out-Null
 
-# Don't prompt about the CEIP / invalid certs interactively during an unattended run
-Set-PowerCLIConfiguration -Scope Session -InvalidCertificateAction Ignore -ParticipateInCeip $false -Confirm:$false | Out-Null
+# Don't prompt about the CEIP / invalid certs interactively during an unattended run.
+# -TrustAllCertificates (default on) ignores untrusted/self-signed vCenter certs;
+# pass -TrustAllCertificates:$false to require a valid chain instead.
+$certAction = if ($TrustAllCertificates) { 'Ignore' } else { 'Fail' }
+Set-PowerCLIConfiguration -Scope Session -InvalidCertificateAction $certAction -ParticipateInCeip $false -Confirm:$false | Out-Null
 
 #endregion
 
-#region --- Connect -----------------------------------------------------------
-
-Write-Host "`nConnecting to vCenter(s): $($VCenter -join ', ')" -ForegroundColor Cyan
 $connections = @()
-foreach ($vc in $VCenter) {
-    try {
-        $params = @{ Server = $vc; ErrorAction = 'Stop' }
-        if ($Credential) { $params.Credential = $Credential }
-        $connections += Connect-VIServer @params
-        Write-Host "  Connected to $vc" -ForegroundColor Green
-    } catch {
-        Write-Host "  FAILED to connect to $vc : $($_.Exception.Message)" -ForegroundColor Red
-    }
-}
-if (-not $connections) { throw "No vCenter connections established. Aborting." }
-
-#endregion
 
 try {
+    #region --- Connect -------------------------------------------------------
+    # Kept inside the try so a connection failure still lands in the HTML/CSV
+    # report (via Add-Result below) instead of only the console, and so the
+    # finally block still runs (and produces a report) even if every
+    # connection fails.
+    Write-Host "`nConnecting to vCenter(s): $($VCenter -join ', ')" -ForegroundColor Cyan
+    foreach ($vc in $VCenter) {
+        try {
+            $params = @{ Server = $vc; ErrorAction = 'Stop' }
+            if ($Credential) { $params.Credential = $Credential }
+            $connections += Connect-VIServer @params
+            Write-Host "  Connected to $vc" -ForegroundColor Green
+        } catch {
+            Write-Host "  FAILED to connect to $vc : $($_.Exception.Message)" -ForegroundColor Red
+            Add-Result 'Connection' $vc 'Connect' 'FAIL' "Could not connect: $($_.Exception.Message)"
+        }
+    }
+    if (-not $connections) { throw "No vCenter connections established. Aborting." }
+    #endregion
+
     #region --- 1. Host health -----------------------------------------------
     Write-Host "`n=== Host Health ===" -ForegroundColor Cyan
 
@@ -203,7 +217,9 @@ try {
         }
     }
 
-    $vmHosts = Get-VMHost
+    # Explicit -Server so this always spans every connected vCenter,
+    # regardless of the session's DefaultVIServerMode setting.
+    $vmHosts = Get-VMHost -Server $connections
 
     foreach ($h in $vmHosts) {
         # Connection / power state
@@ -311,7 +327,7 @@ try {
 
     #region --- 2. VM compliance ---------------------------------------------
     Write-Host "`n=== VM Compliance ===" -ForegroundColor Cyan
-    $vms = Get-VM
+    $vms = Get-VM -Server $connections
 
     # Pre-fetch snapshots, CD drives and floppy drives for ALL VMs in one
     # round-trip each, rather than calling Get-Snapshot / Get-CDDrive /
@@ -434,7 +450,7 @@ try {
     Write-Host "`n=== Capacity ===" -ForegroundColor Cyan
 
     # Datastore free space
-    foreach ($ds in (Get-Datastore)) {
+    foreach ($ds in (Get-Datastore -Server $connections)) {
         if ($ds.CapacityGB -le 0) { continue }
         $freePct = [math]::Round(($ds.FreeSpaceGB / $ds.CapacityGB) * 100, 1)
         $detail  = "$freePct% free ($([math]::Round($ds.FreeSpaceGB))GB / $([math]::Round($ds.CapacityGB))GB)"
@@ -448,7 +464,7 @@ try {
     }
 
     # Cluster CPU / RAM utilization
-    foreach ($cl in (Get-Cluster)) {
+    foreach ($cl in (Get-Cluster -Server $connections)) {
         $hostsInCl = $cl | Get-VMHost
         $totalCpuMhz = ($hostsInCl | Measure-Object -Property CpuTotalMhz -Sum).Sum
         $usedCpuMhz  = ($hostsInCl | Measure-Object -Property CpuUsageMhz -Sum).Sum
@@ -470,7 +486,7 @@ try {
 
     #region --- 4. Cluster config --------------------------------------------
     Write-Host "`n=== Cluster Config ===" -ForegroundColor Cyan
-    foreach ($cl in (Get-Cluster)) {
+    foreach ($cl in (Get-Cluster -Server $connections)) {
         # HA
         if ($cl.HAEnabled) {
             Add-Result 'ClusterConfig' $cl.Name 'HA' 'PASS' 'HA enabled'
@@ -507,6 +523,13 @@ try {
         Add-Result 'ClusterConfig' $cl.Name 'EVC' 'INFO' ($(if ($evc) { $evc } else { 'Not configured' }))
     }
     #endregion
+}
+catch {
+    # Log a clean one-line message, then rethrow so the run still surfaces as
+    # a failure to the caller/scheduler. The finally block below still runs
+    # first and writes whatever results were collected before the error.
+    Write-Host "`nRun failed: $($_.Exception.Message)" -ForegroundColor Red
+    throw
 }
 finally {
     #region --- Report + disconnect ------------------------------------------
