@@ -104,11 +104,20 @@
     check could not run" usually need different responses. The reports are
     written before the exit code is set, so they exist in every case.
 
-    Use -File to get these codes:
-      pwsh -File .\Invoke-VMwareHealthCheck.ps1 -VCenter vcenter01
-    Under -Command, PowerShell collapses any non-zero script exit to 1
-    unless you propagate it yourself:
-      pwsh -Command "& .\Invoke-VMwareHealthCheck.ps1 -VCenter vcenter01; exit $LASTEXITCODE\"
+    Getting these codes out of a scheduled run depends on how you invoke it,
+    and the two options trade off against each other:
+
+      -File     propagates the exit code, but passes arguments as plain
+                strings rather than parsing them as PowerShell, so it cannot
+                take a list. -VCenter vc1,vc2 arrives as one server literally
+                named "vc1,vc2", and -VCenter vc1 vc2 silently drops vc2.
+                Use it for a single vCenter:
+                  pwsh -File .\Invoke-VMwareHealthCheck.ps1 -VCenter vcenter01
+
+      -Command  parses its argument as PowerShell, so a list works, but it
+                collapses any non-zero script exit to 1 unless you propagate
+                $LASTEXITCODE yourself. Use it for more than one vCenter:
+                  pwsh -Command "& .\Invoke-VMwareHealthCheck.ps1 -VCenter vc1,vc2; exit $LASTEXITCODE\"
 #>
 
 [CmdletBinding()]

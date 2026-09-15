@@ -161,6 +161,17 @@ If CDP is disabled, or the connected switch only speaks LLDP, the CDP-vs-switch 
 
 ![Sample MTU consistency check HTML report](docs/img/mtu-consistency-check-sample.png)
 
+## Tests
+
+`HealthCheck/Invoke-VMwareHealthCheck.ps1` has an end-to-end test suite that runs without a
+vCenter, using a stub PowerCLI module:
+
+```powershell
+pwsh -File tests/Invoke-HealthCheckTests.ps1
+```
+
+It exits non-zero if any assertion fails. See [`tests/README.md`](tests/README.md).
+
 ## Conventions
 
 - Scripts are **read-only by default**; any script that changes state will say so clearly and support `-WhatIf` where practical.
