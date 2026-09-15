@@ -225,14 +225,26 @@ try {
         ($bare.ExitCode -ne 0 -and $null -eq $bare.CertPolicy) `
         "exit $($bare.ExitCode), policy '$($bare.CertPolicy)'; $($bare.LogTail)"
 
-    # Diagnostic, not an assertion. -File does not parse its arguments as
-    # PowerShell, and whether a literal "$false" reaches a [bool] parameter
-    # there is edition-specific. Report what this host actually does, so the
-    # scripts' help can describe it from evidence rather than assumption.
+    # -File does not parse its arguments as PowerShell, and whether a literal
+    # "$false" reaches a [bool] parameter through it is edition-specific. The
+    # scripts' help makes a claim about this per edition, so pin it here
+    # rather than leaving it as prose that can quietly go stale.
     $viaFile = Invoke-Scenario 'Healthy' -Label 'HealthyStrictCertViaFile' -Via File `
         -ExtraArgs @('-TrustAllCertificates:$false')
     Write-Host ("  NOTE  -File with -TrustAllCertificates:`$false -> exit $($viaFile.ExitCode), policy '$($viaFile.CertPolicy)'") -ForegroundColor DarkGray
-    if ($viaFile.LogTail) { Write-Host "        $($viaFile.LogTail)" -ForegroundColor DarkGray }
+    if ($PSVersionTable.PSEdition -eq 'Desktop') {
+        # Windows PowerShell passes the literal string "$false", which a [bool]
+        # rejects. The point worth pinning is that it fails loudly rather than
+        # falling back to the trusting default.
+        Assert-That '-File rejects the colon form on Windows PowerShell, without trusting' `
+            ($viaFile.ExitCode -ne 0 -and $viaFile.CertPolicy -ne 'Ignore') `
+            "exit $($viaFile.ExitCode), policy '$($viaFile.CertPolicy)'; $($viaFile.LogTail)"
+    } else {
+        # PowerShell 7 converts a literal $true/$false in a -File argument.
+        Assert-That '-File honours the colon form on PowerShell 7' `
+            ($viaFile.CertPolicy -eq 'Fail') `
+            "policy '$($viaFile.CertPolicy)'; $($viaFile.LogTail)"
+    }
 
     # --- HostDown -----------------------------------------------------------
     Write-Host "`nScenario: HostDown" -ForegroundColor Cyan

@@ -64,12 +64,23 @@
     many vCenters run on internal or self-signed certs. Pass
     -TrustAllCertificates:$false to require a valid chain instead.
 
-    Use that colon form specifically - it is the one that works from both
-    an interactive session and `pwsh -File`. Under -File, arguments are not
-    parsed as PowerShell, so the space-separated -TrustAllCertificates
-    $false arrives as a literal string and is rejected. That is a loud
-    binding error rather than a silent fall back to $true, but the colon
-    form avoids the question.
+    Use the colon form. Whether it survives the command line depends on how
+    the script is launched, because -File does not parse its arguments as
+    PowerShell:
+
+      - From a PowerShell session, or via `pwsh -File`: works. PowerShell 7
+        converts a literal $true/$false in a -File argument.
+      - Via `powershell.exe -File` (Windows PowerShell 5.1): does NOT work.
+        5.1 passes it as the literal string "$false", which a [bool]
+        rejects, and the run stops with a parameter binding error. That
+        fails safe - it does not quietly fall back to $true - but to
+        actually turn the setting off from a 5.1 scheduled task, use
+        -Command and propagate the exit code yourself:
+
+          powershell -Command "& .\<script>.ps1 -VCenter vc1 -TrustAllCertificates:$false; exit $LASTEXITCODE"
+
+    The space-separated -TrustAllCertificates $false is rejected under
+    -File on both editions, for the same reason.
 
     Deliberately a [bool] and not a [switch]: a switch that defaults to
     $true cannot be turned off by its bare form, so -TrustAllCertificates

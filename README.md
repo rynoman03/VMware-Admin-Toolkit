@@ -41,8 +41,10 @@ $cred = Get-Credential
 By default, untrusted/self-signed vCenter certificates are accepted so the script
 can connect to typical internal vCenters without extra setup (`-TrustAllCertificates`
 defaults to `$true`). Pass `-TrustAllCertificates:$false` to require a valid chain
-instead — use that colon form, which binds correctly both interactively and under
-`pwsh -File`.
+instead. Use that colon form: it binds correctly from a PowerShell session and under
+`pwsh -File`. Under `powershell.exe -File` (Windows PowerShell 5.1) it does **not** bind
+— 5.1 passes it as a literal string and the run stops with a parameter binding error
+rather than silently trusting, so from a 5.1 scheduled task use `-Command` instead.
 A failed connection to any vCenter is recorded as a `FAIL` in the report itself (not
 just the console), and if every vCenter fails to connect, the run still produces a
 report showing those failures.
