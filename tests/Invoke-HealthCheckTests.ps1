@@ -90,11 +90,18 @@ function Invoke-Scenario {
         # single-vCenter path, which invokes via -File.
         [string[]] $ExtraArgs = @(),
         # Output folder name, so the same scenario can be run more than once.
-        [string]   $Label
+        [string]   $Label,
+        # How to invoke the script. -File propagates the exit code but passes
+        # arguments as plain strings; -Command parses them as PowerShell but
+        # needs $LASTEXITCODE propagated by hand. Both are exercised.
+        [ValidateSet('File', 'Command')] [string] $Via
     )
     if (-not $Label) { $Label = $Scenario }
-    if ($ExtraArgs.Count -gt 0 -and $VCenter.Count -gt 1) {
-        throw 'ExtraArgs is only supported for single-vCenter scenarios.'
+    # A list cannot be passed through -File at all, so multiple vCenters always
+    # go via -Command.
+    if (-not $Via) { $Via = if ($VCenter.Count -gt 1) { 'Command' } else { 'File' } }
+    if ($Via -eq 'File' -and $VCenter.Count -gt 1) {
+        throw '-File cannot express a vCenter list.'
     }
 
     $dir = Join-Path $WorkPath $Label
@@ -113,14 +120,11 @@ function Invoke-Scenario {
     # runner instead of letting the scenario's exit code be asserted on.
     $ErrorActionPreference = 'Continue'
     try {
-        if ($VCenter.Count -gt 1) {
-            # -File passes arguments as plain strings, so a list has to go
-            # through -Command, which in turn does not propagate a script's
-            # exit code on its own. Both halves of the trade-off the health
-            # check's .NOTES describes get exercised across these scenarios.
+        if ($Via -eq 'Command') {
             $literal = ($VCenter | ForEach-Object { "'" + ($_ -replace "'", "''") + "'" }) -join ','
+            $extra   = if ($ExtraArgs.Count -gt 0) { ' ' + ($ExtraArgs -join ' ') } else { '' }
             & $pwshExe -NoProfile -Command `
-                "& '$ScriptPath' -VCenter $literal -ReportPath '$dir'; exit `$LASTEXITCODE" *> $log
+                "& '$ScriptPath' -VCenter $literal -ReportPath '$dir'$extra; exit `$LASTEXITCODE" *> $log
         } else {
             & $pwshExe -NoProfile -File $ScriptPath -VCenter $VCenter[0] -ReportPath $dir @ExtraArgs *> $log
         }
@@ -142,6 +146,14 @@ function Invoke-Scenario {
         Csv      = $csv
         Html     = $html
         Log      = $log
+        # The tail of the child's own output. A failure that reproduces only on
+        # one PowerShell edition is otherwise invisible without downloading the
+        # CI artifact, which is not always reachable.
+        LogTail  = if (Test-Path -LiteralPath $log) {
+            ((Get-Content -LiteralPath $log |
+                Where-Object { $_ -match '\S' } |
+                Select-Object -Last 3) -join ' | ')
+        } else { '' }
         # What the script asked PowerCLI to do about certificates, or $null.
         CertPolicy = if (Test-Path -LiteralPath $probe) {
             ((Get-Content -LiteralPath $probe -Raw) -replace '(?s)^.*InvalidCertificateAction=', '').Trim()
@@ -192,20 +204,35 @@ try {
     Assert-That 'certificate errors are ignored by default' `
         ($r.CertPolicy -eq 'Ignore') "InvalidCertificateAction was '$($r.CertPolicy)'"
 
-    $strict = Invoke-Scenario 'Healthy' -Label 'HealthyStrictCert' -ExtraArgs @('-TrustAllCertificates:$false')
+    # Via -Command, where arguments are parsed as PowerShell. Under -File they
+    # are plain strings, and whether a literal "$false" binds to a [bool]
+    # there is edition-specific - see the diagnostic below.
+    $strict = Invoke-Scenario 'Healthy' -Label 'HealthyStrictCert' -Via Command `
+        -ExtraArgs @('-TrustAllCertificates:$false')
     Assert-That '-TrustAllCertificates:$false requires a valid chain' `
-        ($strict.CertPolicy -eq 'Fail') "InvalidCertificateAction was '$($strict.CertPolicy)'"
+        ($strict.CertPolicy -eq 'Fail') `
+        "InvalidCertificateAction was '$($strict.CertPolicy)'; exit $($strict.ExitCode); $($strict.LogTail)"
     Assert-That 'the strict run still completes' ($strict.ExitCode -eq 0) `
-        "exit code was $($strict.ExitCode)"
+        "exit code was $($strict.ExitCode); $($strict.LogTail)"
 
     # The one that pins the [bool]: as a [switch] defaulting to $true, the bare
     # form bound to $true and did nothing, so an operator who wrote
     # -TrustAllCertificates expecting it to mean something got silence. A
     # [bool] requires a value, making that a binding error instead.
-    $bare = Invoke-Scenario 'Healthy' -Label 'HealthyBareFlag' -ExtraArgs @('-TrustAllCertificates')
+    $bare = Invoke-Scenario 'Healthy' -Label 'HealthyBareFlag' -Via File `
+        -ExtraArgs @('-TrustAllCertificates')
     Assert-That 'bare -TrustAllCertificates is rejected, not silently ignored' `
         ($bare.ExitCode -ne 0 -and $null -eq $bare.CertPolicy) `
-        "exit $($bare.ExitCode), policy '$($bare.CertPolicy)'"
+        "exit $($bare.ExitCode), policy '$($bare.CertPolicy)'; $($bare.LogTail)"
+
+    # Diagnostic, not an assertion. -File does not parse its arguments as
+    # PowerShell, and whether a literal "$false" reaches a [bool] parameter
+    # there is edition-specific. Report what this host actually does, so the
+    # scripts' help can describe it from evidence rather than assumption.
+    $viaFile = Invoke-Scenario 'Healthy' -Label 'HealthyStrictCertViaFile' -Via File `
+        -ExtraArgs @('-TrustAllCertificates:$false')
+    Write-Host ("  NOTE  -File with -TrustAllCertificates:`$false -> exit $($viaFile.ExitCode), policy '$($viaFile.CertPolicy)'") -ForegroundColor DarkGray
+    if ($viaFile.LogTail) { Write-Host "        $($viaFile.LogTail)" -ForegroundColor DarkGray }
 
     # --- HostDown -----------------------------------------------------------
     Write-Host "`nScenario: HostDown" -ForegroundColor Cyan
