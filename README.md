@@ -47,8 +47,8 @@ report showing those failures.
 
 The script checks:
 
-- **Host health** — connection state, NTP, syslog, uptime, datastore connectivity, FC/iSCSI storage path state (dead paths, even when a datastore still reads as accessible on its remaining paths), TLS certificate expiry (ESXi hosts and vCenter itself), local account password expiration policy (root included), ESXi build vs. vCenter build
-- **VM compliance** — VMware Tools, OS system drive free space (`C:\` / `/`), all other guest drives, VM hardware version, mounted ISOs/CD-ROMs, connected floppy drives, snapshot age
+- **Host health** — connection state, NTP, syslog, uptime, datastore connectivity, FC/iSCSI storage path state (dead paths, even when a datastore still reads as accessible on its remaining paths), TLS certificate expiry (ESXi hosts and vCenter itself), local account password expiration policy (root included), ESXi build vs. vCenter build, lockdown mode, SSH service state
+- **VM compliance** — connection state (orphaned/inaccessible VMs), disk consolidation needed, VMware Tools, OS system drive free space (`C:\` / `/`), all other guest drives, VM hardware version, mounted ISOs/CD-ROMs, connected floppy drives, snapshot age
 - **Capacity** — datastore free space, cluster CPU/RAM utilization
 - **Cluster config** — HA, admission control, DRS, EVC
 
@@ -71,6 +71,23 @@ exactly; `WARN` on a minor version difference; `FAIL` when a host is newer than
 vCenter, or more than `-HostVersionSkewFailMajors` (default 2) major versions behind
 it. No extra vCenter round-trip is needed — the connection object from
 `Connect-VIServer` and each host from `Get-VMHost` already carry `.Version`/`.Build`.
+
+**Lockdown mode & SSH.** Two easy-to-miss host hygiene checks. `WARN` when a host's
+lockdown mode is `Disabled` (direct root/local logins bypass vCenter, reducing
+auditability — Normal or Strict is recommended), and `WARN` when the SSH (`TSM-SSH`)
+service is running (often enabled temporarily for troubleshooting and then forgotten).
+
+**VM connection state.** `FAIL` when a VM shows as `orphaned`, `inaccessible`, or
+`invalid` — vCenter's inventory losing track of the VM, shown as the "question mark"
+icon in the vSphere Client. Runs regardless of power state, since this doesn't
+correlate with whether the VM is powered on. `WARN` on `disconnected` (the host may
+just be temporarily unreachable).
+
+**Disk consolidation needed.** `WARN` when a VM has leftover snapshot delta disks
+that need consolidating — often left behind by backup software that didn't clean up
+after itself, and easy to miss since it's a separate flag from the `Snapshot` check
+above (a VM can need consolidation with no visible snapshot in the UI). Left alone,
+these silently consume growing datastore space.
 
 Findings are tagged `PASS` / `WARN` / `FAIL` / `INFO`. The script never modifies configuration.
 

@@ -4,8 +4,8 @@
 
 .DESCRIPTION
     Connects to one or more vCenter Servers and evaluates four areas:
-        1. Host health     - connection state, NTP, syslog, uptime, datastore connectivity, storage path state, TLS certificate expiry (hosts + vCenter), local account password expiration policy, ESXi build vs vCenter build
-        2. VM compliance   - VMware Tools, VM hardware version, mounted ISOs, floppy drives, snapshot age
+        1. Host health     - connection state, NTP, syslog, uptime, datastore connectivity, storage path state, TLS certificate expiry (hosts + vCenter), local account password expiration policy, ESXi build vs vCenter build, lockdown mode, SSH service state
+        2. VM compliance   - connection state (orphaned/inaccessible VMs), disk consolidation needed, VMware Tools, VM hardware version, mounted ISOs, floppy drives, snapshot age
         3. Capacity        - datastore free space, cluster CPU/RAM utilization
         4. Cluster config  - HA / DRS / admission control
 
@@ -373,6 +373,28 @@ try {
         } catch {
             Add-Result 'HostHealth' $h.Name 'PasswordExpirationPolicy' 'INFO' "Could not read Security.PasswordExpirationInDays: $($_.Exception.Message)"
         }
+
+        # Lockdown mode - Disabled means direct root/local logins to the host
+        # bypass vCenter entirely, reducing auditability. Security hardening
+        # guides recommend Normal or Strict for production hosts.
+        $lockdown = $h.ExtensionData.Config.LockdownMode
+        switch ($lockdown) {
+            'lockdownDisabled' { Add-Result 'HostHealth' $h.Name 'LockdownMode' 'WARN' 'Disabled - direct root/local logins to this host bypass vCenter, reducing auditability; consider Normal or Strict lockdown' }
+            'lockdownNormal'   { Add-Result 'HostHealth' $h.Name 'LockdownMode' 'PASS' 'Normal' }
+            'lockdownStrict'   { Add-Result 'HostHealth' $h.Name 'LockdownMode' 'PASS' 'Strict' }
+            default            { Add-Result 'HostHealth' $h.Name 'LockdownMode' 'INFO' "Could not read lockdown mode ($lockdown)" }
+        }
+
+        # SSH (TSM-SSH) service - often enabled temporarily for troubleshooting
+        # and then forgotten; left running long-term it's extra attack surface.
+        $sshSvc = $h | Get-VMHostService | Where-Object { $_.Key -eq 'TSM-SSH' }
+        if (-not $sshSvc) {
+            Add-Result 'HostHealth' $h.Name 'SSHEnabled' 'INFO' 'Could not read SSH (TSM-SSH) service state'
+        } elseif ($sshSvc.Running) {
+            Add-Result 'HostHealth' $h.Name 'SSHEnabled' 'WARN' 'SSH service is running - confirm this is intentional; leaving it enabled long-term increases attack surface'
+        } else {
+            Add-Result 'HostHealth' $h.Name 'SSHEnabled' 'PASS' 'SSH service not running'
+        }
     }
     #endregion
 
@@ -409,6 +431,26 @@ try {
     }
 
     foreach ($vm in $vms) {
+        # Connection state - orphaned/inaccessible/invalid is vCenter's
+        # inventory losing track of the VM (the "question mark" icon in the
+        # vSphere Client). Runs regardless of power state and is easy to miss
+        # since it doesn't show up in any other check here.
+        $connState = $vm.ExtensionData.Runtime.ConnectionState
+        switch ($connState) {
+            'connected'    { Add-Result 'VMCompliance' $vm.Name 'ConnectionState' 'PASS' 'Connected' }
+            'disconnected' { Add-Result 'VMCompliance' $vm.Name 'ConnectionState' 'WARN' 'Disconnected (host may be unreachable)' }
+            default        { Add-Result 'VMCompliance' $vm.Name 'ConnectionState' 'FAIL' "$connState" }
+        }
+
+        # Disk consolidation needed - leftover snapshot delta disks, often
+        # left behind by backup software that didn't clean up after itself,
+        # that silently consume growing datastore space until consolidated.
+        if ($vm.ExtensionData.Runtime.ConsolidationNeeded) {
+            Add-Result 'VMCompliance' $vm.Name 'DiskConsolidation' 'WARN' 'Disk consolidation needed - leftover snapshot delta disk(s) present'
+        } else {
+            Add-Result 'VMCompliance' $vm.Name 'DiskConsolidation' 'PASS' 'No consolidation needed'
+        }
+
         # VMware Tools status (only meaningful when powered on)
         if ($vm.PowerState -eq 'PoweredOn') {
             $toolsStatus = $vm.ExtensionData.Guest.ToolsStatus
