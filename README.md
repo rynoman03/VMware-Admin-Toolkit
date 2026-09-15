@@ -91,11 +91,11 @@ Add ~10-30s for the initial PowerCLI module import. As long as `PASS`/`WARN` lin
 
 Both carry the columns **Category, Object, Check, Status, Detail**, and are written in a `finally` block — so you still get a report even if the run errors partway through. Pass `-ReportPath C:\Reports` to keep output in a fixed location instead of wherever you launched from.
 
-The **HTML report opens pre-filtered to just `FAIL` + `WARN`** (what needs fixing), with clickable buttons at the top — `Needs attention`, `FAIL`, `WARN`, `INFO`, `PASS`, `All` — each showing a live count, so you can drill straight to the problems instead of scrolling past everything that passed. The summary numbers themselves are clickable too.
+The HTML report uses a **dashboard-style layout** — a dark navy header and left navigation sidebar, a blue accent color, and status pill badges (`PASS`/`WARN`/`FAIL`/`INFO`), similar in feel to a Dell iDRAC or OpenManage console. Color-coded **stat tiles** at the top (Fail / Warn / Info / Pass counts) are clickable and double as the severity filter, alongside the same **`Needs attention`, `FAIL`, `WARN`, `INFO`, `PASS`, `All`** filter buttons — the report opens pre-filtered to `FAIL` + `WARN` (what needs fixing), so you can drill straight to the problems instead of scrolling past everything that passed.
 
-Results are also broken into **per-check sections** (e.g. *VMware Tools*, *Hardware Version*, *Mounted ISOs*, *Snapshots*, *NTP*, *Datastore Free*), each in its own table. A **Contents/appendix at the top** lists every section grouped by category with per-section counts and `FAIL`/`WARN` badges — click an entry to jump straight to that table. Severity filtering and section navigation work together: under a filter, sections with no matching rows are hidden automatically, and clicking a Contents link reveals the target. (The CSV stays complete and unfiltered for trending; open it in Excel and use AutoFilter on the Status column for the same effect.)
+Results are also broken into **per-check sections** (e.g. *VMware Tools*, *Hardware Version*, *Mounted ISOs*, *Snapshots*, *NTP*, *Datastore Free*), each in its own table. The left **sidebar** lists every section grouped by category with per-section counts and `FAIL`/`WARN` badges — click an entry to jump straight to that table. Severity filtering and section navigation work together: under a filter, sections with no matching rows are hidden automatically, and clicking a sidebar link reveals the target. (The CSV stays complete and unfiltered for trending; open it in Excel and use AutoFilter on the Status column for the same effect.)
 
-**Sample report** (fictional lab data):
+**Sample report** (fictional lab data; screenshot predates the current dashboard-style layout):
 
 ![Sample health check HTML report](docs/img/healthcheck-sample.png)
 
@@ -140,7 +140,7 @@ If CDP is disabled, or the connected switch only speaks LLDP, the CDP-vs-switch 
 
 **Output.** Like the other reports, results are written to two timestamped files in `-ReportPath` (**defaults to the current directory**): `VMwareMtuConsistencyCheck-<yyyyMMdd-HHmmss>.html` and `.csv`, both with the columns **Category, Object, Check, Status, Detail**, produced in a `finally` block even if the run errors. The HTML report opens pre-filtered to `FAIL` + `WARN` with the same clickable status buttons and per-check sections as the health check.
 
-**Sample report** (fictional lab data):
+**Sample report** (fictional lab data; screenshot predates the current dashboard-style layout):
 
 ![Sample MTU consistency check HTML report](docs/img/mtu-consistency-check-sample.png)
 

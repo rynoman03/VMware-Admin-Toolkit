@@ -244,45 +244,83 @@ finally {
     $stamp     = Get-Date -Format 'yyyyMMdd-HHmmss'
     $htmlFile  = Join-Path $ReportPath "VMwareMtuConsistencyCheck-$stamp.html"
 
+    # Styled after a Dell iDRAC-style dashboard: dark navy header/sidebar, a
+    # blue accent, status pill badges, and a stat-tile summary row instead of
+    # a plain text line.
     $style = @"
 <style>
- body { font-family: Segoe UI, Arial, sans-serif; margin: 20px; background: #ffffff; color: #1a1a1a; }
- h1 { color: #333; }
- h2 { color: #2d3e50; margin-top: 30px; border-bottom: 2px solid #e1e4e8; padding-bottom: 4px; }
- table { border-collapse: collapse; width: 100%; margin-top: 6px; }
- th, td { border: 1px solid #ddd; padding: 6px 10px; text-align: left; font-size: 13px; }
- th { background: #2d3e50; color: #fff; }
- tr:nth-child(even) { background: #f6f8fa; }
- .PASS { color: #1a7f37; font-weight: bold; }
- .WARN { color: #b88600; font-weight: bold; }
- .FAIL { color: #cf222e; font-weight: bold; }
- .INFO { color: #57606a; }
- .filters { margin: 16px 0; }
- .filters button { font: inherit; font-size: 13px; padding: 6px 12px; margin: 0 6px 6px 0; border: 1px solid #ccc; border-radius: 4px; background: #fff; cursor: pointer; }
- .filters button:hover { border-color: #2d3e50; }
- .filters button.active { background: #2d3e50; color: #fff; border-color: #2d3e50; }
+ :root {
+  --navy: #0b1f33; --navy-2: #123252; --accent: #045a9e;
+  --bg: #eef1f5; --surface: #ffffff; --border: #dbe1e8;
+  --text: #1c2733; --muted: #64748b;
+  --ok: #1e7c34; --ok-bg: #e6f4ea;
+  --warn: #96650b; --warn-bg: #fff4e0;
+  --crit: #a61b1b; --crit-bg: #fdeaea;
+  --info: #51606f; --info-bg: #eef1f4;
+ }
+ * { box-sizing: border-box; }
+ body { font-family: Segoe UI, Arial, sans-serif; margin: 0; background: var(--bg); color: var(--text); }
+ a { color: var(--accent); }
+ .topbar { background: linear-gradient(180deg, var(--navy) 0%, var(--navy-2) 100%); color: #fff; padding: 14px 24px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+ .topbar-brand { display: flex; align-items: center; gap: 12px; }
+ .brand-badge { display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 34px; border-radius: 6px; background: var(--accent); color: #fff; font-weight: 700; font-size: 13px; letter-spacing: .5px; flex: none; }
+ .brand-title { font-size: 18px; font-weight: 600; }
+ .topbar-meta { font-size: 12px; color: #c7d2df; }
+ .layout { display: flex; align-items: flex-start; }
+ .sidebar { width: 270px; flex: 0 0 270px; background: var(--navy); color: #dbe6f0; padding: 18px 0; position: sticky; top: 0; align-self: flex-start; max-height: 100vh; overflow-y: auto; }
+ .sidebar h3 { margin: 0 18px 10px; font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: #8fa3ba; }
+ .sidebar .toc-cat { margin: 0 0 14px; }
+ .sidebar .toc-cat-name { display: block; padding: 6px 18px; font-weight: 600; font-size: 12px; color: #a9bdd2; text-transform: uppercase; letter-spacing: .04em; }
+ .sidebar ul { list-style: none; margin: 4px 0 0; padding: 0; }
+ .sidebar li { margin: 0; }
+ .sidebar a { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 6px 18px; font-size: 13px; color: #dbe6f0; text-decoration: none; border-left: 3px solid transparent; cursor: pointer; }
+ .sidebar a:hover { background: var(--navy-2); border-left-color: var(--accent); }
+ .sidebar .muted { color: #7c93ab; font-size: 11px; }
+ .content { flex: 1; min-width: 0; padding: 24px; }
+ .meta-line { color: var(--muted); font-size: 13px; margin: 0 0 16px; }
+ .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 18px; }
+ .stat-tile { background: var(--surface); border: 1px solid var(--border); border-left: 4px solid var(--muted); border-radius: 8px; padding: 14px 16px; cursor: pointer; text-align: left; font: inherit; }
+ .stat-tile .stat-num { display: block; font-size: 26px; font-weight: 700; line-height: 1.1; }
+ .stat-tile .stat-label { display: block; font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; margin-top: 2px; }
+ .stat-tile.stat-FAIL { border-left-color: var(--crit); }
+ .stat-tile.stat-FAIL .stat-num { color: var(--crit); }
+ .stat-tile.stat-WARN { border-left-color: var(--warn); }
+ .stat-tile.stat-WARN .stat-num { color: var(--warn); }
+ .stat-tile.stat-INFO { border-left-color: var(--info); }
+ .stat-tile.stat-INFO .stat-num { color: var(--info); }
+ .stat-tile.stat-PASS { border-left-color: var(--ok); }
+ .stat-tile.stat-PASS .stat-num { color: var(--ok); }
+ .stat-tile.active { box-shadow: 0 0 0 2px var(--accent) inset; }
+ .filters { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 20px; }
+ .filters button { font: inherit; font-size: 13px; padding: 7px 14px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); color: var(--text); cursor: pointer; }
+ .filters button:hover { border-color: var(--accent); color: var(--accent); }
+ .filters button.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+ h2 { color: var(--navy); margin: 28px 0 4px; padding-left: 10px; border-left: 4px solid var(--accent); font-size: 16px; }
+ table { border-collapse: collapse; width: 100%; margin-top: 6px; background: var(--surface); border-radius: 6px; overflow: hidden; box-shadow: 0 1px 2px rgba(16,24,40,.05); }
+ th, td { border-bottom: 1px solid var(--border); padding: 8px 12px; text-align: left; font-size: 13px; }
+ th { background: var(--navy); color: #fff; font-weight: 600; }
+ tr:hover td { background: #f5f8fb; }
+ .badge { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 11px; font-weight: 700; letter-spacing: .03em; }
+ .badge-PASS { background: var(--ok-bg); color: var(--ok); }
+ .badge-WARN { background: var(--warn-bg); color: var(--warn); }
+ .badge-FAIL { background: var(--crit-bg); color: var(--crit); }
+ .badge-INFO { background: var(--info-bg); color: var(--info); }
  tr.hidden, h2.hidden, table.hidden { display: none; }
- #emptyNote { color: #57606a; font-style: italic; margin: 12px 0; display: none; }
- .sumlink { cursor: pointer; text-decoration: underline; }
- .toc { background: #f6f8fa; border: 1px solid #e1e4e8; border-radius: 6px; padding: 12px 18px; margin: 16px 0; }
- .toc h3 { margin: 0 0 8px; color: #2d3e50; font-size: 15px; }
- .toc-cat { margin: 8px 0; }
- .toc-cat-name { font-weight: bold; color: #555; }
- .toc ul { margin: 4px 0 0; padding-left: 18px; columns: 2; }
- .toc li { margin: 2px 0; list-style: square; }
- .toc a { color: #0969da; text-decoration: none; cursor: pointer; }
- .toc a:hover { text-decoration: underline; }
+ #emptyNote { color: var(--muted); font-style: italic; margin: 12px 0; display: none; }
  .b { font-size: 11px; font-weight: bold; padding: 0 5px; border-radius: 8px; margin-left: 4px; }
- .bFAIL { background: #ffebe9; color: #cf222e; }
- .bWARN { background: #fff8c5; color: #7d4e00; }
- .muted { color: #8b949e; font-size: 12px; }
- .seccount { color: #8b949e; font-weight: normal; font-size: 13px; }
- .backtop { font-size: 12px; margin-left: 10px; font-weight: normal; }
+ .bFAIL { background: var(--crit-bg); color: var(--crit); }
+ .bWARN { background: var(--warn-bg); color: var(--warn); }
+ .seccount { color: var(--muted); font-weight: normal; font-size: 13px; }
+ .backtop { font-size: 12px; margin-left: 10px; font-weight: normal; color: var(--accent); text-decoration: none; }
+ @media (max-width: 820px) {
+  .layout { flex-direction: column; }
+  .sidebar { width: 100%; flex-basis: auto; position: static; max-height: none; }
+ }
 </style>
 "@
 
-    # Per-status counts for the filter buttons. @() guards the PowerShell
-    # quirk where a single matching object has no usable .Count.
+    # Per-status counts for the stat tiles and filter buttons. @() guards the
+    # PowerShell quirk where a single matching object has no usable .Count.
     $cFail = @($script:Results | Where-Object { $_.Status -eq 'FAIL' }).Count
     $cWarn = @($script:Results | Where-Object { $_.Status -eq 'WARN' }).Count
     $cInfo = @($script:Results | Where-Object { $_.Status -eq 'INFO' }).Count
@@ -291,11 +329,6 @@ finally {
     # $script:Results is a List[object]; read .Count directly. Wrapping it as
     # @($script:Results).Count throws "Argument types do not match" in WinPS 5.1.
     $cAll  = $script:Results.Count
-
-    # Clickable, color-coded summary tokens (e.g. FAIL=57) wired to the same filter
-    $summaryHtml = (($script:Results | Group-Object Status | ForEach-Object {
-        "<span class='sumlink $($_.Name)' data-filter='$($_.Name)'>$($_.Name)=$($_.Count)</span>"
-    }) -join ' &nbsp; ')
 
     # Group results into per-check sections (Category + Check), preserving
     # first-seen order. Each becomes its own anchored table, navigable from the
@@ -335,7 +368,7 @@ finally {
     $bodyHtml = foreach ($sec in $sections) {
         $secRows = ($sec.Rows | ForEach-Object {
             "<tr data-status='$($_.Status)'><td>$([System.Net.WebUtility]::HtmlEncode([string]$_.Object))</td>" +
-            "<td class='$($_.Status)'>$($_.Status)</td><td>$([System.Net.WebUtility]::HtmlEncode([string]$_.Detail))</td></tr>"
+            "<td><span class='badge badge-$($_.Status)'>$($_.Status)</span></td><td>$([System.Net.WebUtility]::HtmlEncode([string]$_.Detail))</td></tr>"
         }) -join "`n"
         @"
 <h2 id="$($sec.Id)" data-section="$($sec.Id)">$($sec.Cat) &rsaquo; $($sec.Check) <span class="seccount">($($sec.Rows.Count))</span> <a class="backtop" href="#top">&uarr; top</a></h2>
@@ -349,27 +382,39 @@ $secRows
     $html = @"
 <!DOCTYPE html><html><head><meta charset='utf-8'>$style
 <title>VMware MTU Consistency Check $stamp</title></head><body>
-<a id="top"></a>
-<h1>VMware MTU Consistency Report</h1>
-<p>Generated: $(Get-Date)<br>vCenter(s): $($VCenter -join ', ')<br>
-Summary: $summaryHtml &nbsp; <span style='color:#57606a'>(click a number or button to filter)</span></p>
-<div class="filters">
- <button data-filter="attention" class="active">Needs attention &mdash; FAIL + WARN ($cAttn)</button>
- <button data-filter="FAIL">FAIL ($cFail)</button>
- <button data-filter="WARN">WARN ($cWarn)</button>
- <button data-filter="INFO">INFO ($cInfo)</button>
- <button data-filter="PASS">PASS ($cPass)</button>
- <button data-filter="all">All ($cAll)</button>
+<header class="topbar">
+ <div class="topbar-brand"><span class="brand-badge">MTU</span><span class="brand-title">VMware MTU Consistency Report</span></div>
+ <div class="topbar-meta">Generated $(Get-Date) &nbsp;&bull;&nbsp; vCenter(s): $($VCenter -join ', ')</div>
+</header>
+<div class="layout">
+ <nav class="sidebar">
+  <h3>Contents</h3>
+  $tocHtml
+ </nav>
+ <main class="content">
+  <a id="top"></a>
+  <div class="stats">
+   <button class="stat-tile stat-FAIL" data-filter="FAIL"><span class="stat-num">$cFail</span><span class="stat-label">Fail</span></button>
+   <button class="stat-tile stat-WARN" data-filter="WARN"><span class="stat-num">$cWarn</span><span class="stat-label">Warn</span></button>
+   <button class="stat-tile stat-INFO" data-filter="INFO"><span class="stat-num">$cInfo</span><span class="stat-label">Info</span></button>
+   <button class="stat-tile stat-PASS" data-filter="PASS"><span class="stat-num">$cPass</span><span class="stat-label">Pass</span></button>
+  </div>
+  <div class="filters">
+   <button data-filter="attention" class="active">Needs attention &mdash; FAIL + WARN ($cAttn)</button>
+   <button data-filter="FAIL">FAIL ($cFail)</button>
+   <button data-filter="WARN">WARN ($cWarn)</button>
+   <button data-filter="INFO">INFO ($cInfo)</button>
+   <button data-filter="PASS">PASS ($cPass)</button>
+   <button data-filter="all">All ($cAll)</button>
+  </div>
+  <p id="emptyNote">Nothing matches this filter.</p>
+  $bodyHtml
+ </main>
 </div>
-<div class="toc">
- <h3>Contents &mdash; jump to a section</h3>
- $tocHtml
-</div>
-<p id="emptyNote">Nothing matches this filter.</p>
-$bodyHtml
 <script>
 (function(){
  var buttons = document.querySelectorAll('.filters button');
+ var tiles = document.querySelectorAll('.stat-tile');
  var rows = document.querySelectorAll('table tr[data-status]');
  var note = document.getElementById('emptyNote');
  var tables = document.querySelectorAll('[data-section-table]');
@@ -391,11 +436,12 @@ $bodyHtml
    if (show) visible++;
   });
   buttons.forEach(function(b){ b.classList.toggle('active', b.getAttribute('data-filter') === filter); });
+  tiles.forEach(function(t){ t.classList.toggle('active', t.getAttribute('data-filter') === filter); });
   refreshSections();
   note.style.display = visible ? 'none' : 'block';
  }
  buttons.forEach(function(b){ b.addEventListener('click', function(){ apply(b.getAttribute('data-filter')); }); });
- document.querySelectorAll('.sumlink').forEach(function(s){ s.addEventListener('click', function(){ apply(s.getAttribute('data-filter')); }); });
+ tiles.forEach(function(t){ t.addEventListener('click', function(){ apply(t.getAttribute('data-filter')); }); });
  document.querySelectorAll('[data-jump]').forEach(function(a){
   a.addEventListener('click', function(e){
    e.preventDefault();
