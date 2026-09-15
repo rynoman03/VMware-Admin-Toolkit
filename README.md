@@ -52,6 +52,17 @@ The script checks:
 - **Capacity** — datastore free space, cluster CPU/RAM utilization
 - **Cluster config** — HA, admission control, DRS, EVC
 
+**EVC (Enhanced vMotion Compatibility).** Reported as the cluster's current EVC mode
+(e.g. `intel-broadwell`), or `Not configured` if none is set. EVC masks each host's
+CPU down to a common baseline instruction set so a running VM can vMotion between
+hosts with different CPU generations without the guest OS seeing the CPU change
+mid-flight — without it, migrating to a host with an older/different feature set can
+crash the guest or vMotion can refuse outright. This check is always `INFO`, never
+`WARN`/`FAIL`: it can't tell from vCenter alone whether a cluster actually has mixed
+CPU generations, so it just surfaces the current setting for you to eyeball — a
+cluster you know is mixed-CPU showing `Not configured` is worth investigating
+manually.
+
 Findings are tagged `PASS` / `WARN` / `FAIL` / `INFO`. The script never modifies configuration.
 
 **Runtime** scales with total inventory, since checks run per-host and per-VM (each a round-trip to vCenter). Connecting to multiple vCenters adds their inventories together. Rough guide:
