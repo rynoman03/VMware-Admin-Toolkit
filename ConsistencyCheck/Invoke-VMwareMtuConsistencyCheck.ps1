@@ -27,6 +27,19 @@
     many vCenters run on internal or self-signed certs. Pass
     -TrustAllCertificates:$false to require a valid chain instead.
 
+    Use that colon form specifically - it is the one that works from both
+    an interactive session and `pwsh -File`. Under -File, arguments are not
+    parsed as PowerShell, so the space-separated -TrustAllCertificates
+    $false arrives as a literal string and is rejected. That is a loud
+    binding error rather than a silent fall back to $true, but the colon
+    form avoids the question.
+
+    Deliberately a [bool] and not a [switch]: a switch that defaults to
+    $true cannot be turned off by its bare form, so -TrustAllCertificates
+    on its own would be a no-op and only the :$false form would do
+    anything. As a [bool] the parameter requires a value, which is the
+    behaviour the name implies.
+
 .EXAMPLE
     .\Invoke-VMwareMtuConsistencyCheck.ps1 -VCenter vcenter01.corp.local
 
@@ -60,7 +73,7 @@ param(
 
     [string] $ReportPath = (Get-Location).Path,
 
-    [switch] $TrustAllCertificates = $true
+    [bool] $TrustAllCertificates = $true
 )
 
 #region --- Setup -------------------------------------------------------------

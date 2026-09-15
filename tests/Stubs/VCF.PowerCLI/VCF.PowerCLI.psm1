@@ -105,6 +105,12 @@ function Set-PowerCLIConfiguration {
         Justification = 'Stub: declares SupportsShouldProcess only so it accepts -Confirm like the real cmdlet does.')]
     [CmdletBinding(SupportsShouldProcess)]
     param($Scope, $InvalidCertificateAction, $ParticipateInCeip)
+    # Record the certificate policy the script asked for, so a test can assert
+    # that -TrustAllCertificates actually reaches PowerCLI.
+    if ($env:HEALTHCHECK_FIXTURE_PROBE) {
+        "InvalidCertificateAction=$InvalidCertificateAction" |
+            Out-File -FilePath $env:HEALTHCHECK_FIXTURE_PROBE -Encoding utf8
+    }
 }
 
 # Each fixture vCenter runs its own version, so a host paired with the wrong

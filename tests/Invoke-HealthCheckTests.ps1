@@ -83,9 +83,21 @@ function Get-ResultRow {
 }
 
 function Invoke-Scenario {
-    param([string] $Scenario, [string[]] $VCenter = @($vcName))
+    param(
+        [string]   $Scenario,
+        [string[]] $VCenter = @($vcName),
+        # Extra arguments for the script under test. Only supported on the
+        # single-vCenter path, which invokes via -File.
+        [string[]] $ExtraArgs = @(),
+        # Output folder name, so the same scenario can be run more than once.
+        [string]   $Label
+    )
+    if (-not $Label) { $Label = $Scenario }
+    if ($ExtraArgs.Count -gt 0 -and $VCenter.Count -gt 1) {
+        throw 'ExtraArgs is only supported for single-vCenter scenarios.'
+    }
 
-    $dir = Join-Path $WorkPath $Scenario
+    $dir = Join-Path $WorkPath $Label
     New-Item -ItemType Directory -Path $dir -Force | Out-Null
     $log = Join-Path $dir 'console.log'
 
@@ -93,6 +105,8 @@ function Invoke-Scenario {
     $savedEap        = $ErrorActionPreference
     $env:PSModulePath = $stubRoot + [System.IO.Path]::PathSeparator + $savedModulePath
     $env:HEALTHCHECK_FIXTURE_SCENARIO = $Scenario
+    $probe = Join-Path $dir 'powercli-config.txt'
+    $env:HEALTHCHECK_FIXTURE_PROBE = $probe
     # Windows PowerShell turns anything a native command writes to stderr into
     # an error record, which the Stop preference above makes terminating. The
     # ConnectFail scenario writes to stderr by design, so that would abort the
@@ -108,13 +122,14 @@ function Invoke-Scenario {
             & $pwshExe -NoProfile -Command `
                 "& '$ScriptPath' -VCenter $literal -ReportPath '$dir'; exit `$LASTEXITCODE" *> $log
         } else {
-            & $pwshExe -NoProfile -File $ScriptPath -VCenter $VCenter[0] -ReportPath $dir *> $log
+            & $pwshExe -NoProfile -File $ScriptPath -VCenter $VCenter[0] -ReportPath $dir @ExtraArgs *> $log
         }
         $code = $LASTEXITCODE
     } finally {
         $env:PSModulePath      = $savedModulePath
         $ErrorActionPreference = $savedEap
         Remove-Item Env:\HEALTHCHECK_FIXTURE_SCENARIO -ErrorAction SilentlyContinue
+        Remove-Item Env:\HEALTHCHECK_FIXTURE_PROBE -ErrorAction SilentlyContinue
     }
 
     $csv  = Get-ChildItem -Path $dir -Filter '*.csv'  -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -127,6 +142,10 @@ function Invoke-Scenario {
         Csv      = $csv
         Html     = $html
         Log      = $log
+        # What the script asked PowerCLI to do about certificates, or $null.
+        CertPolicy = if (Test-Path -LiteralPath $probe) {
+            ((Get-Content -LiteralPath $probe -Raw) -replace '(?s)^.*InvalidCertificateAction=', '').Trim()
+        } else { $null }
     }
 }
 
@@ -165,6 +184,28 @@ try {
     Assert-That 'cluster RAM row is present' ((Get-ResultRow $r.Rows 'CL-FIXTURE' 'ClusterRAM').Count -eq 1)
     Assert-That 'storage paths are walked' `
         ((Get-ResultRow $r.Rows 'esx01.fixture.local' 'PathState')[0].Status -eq 'PASS')
+
+    # -TrustAllCertificates is a [bool] defaulting to $true rather than a
+    # [switch], because a switch defaulting to $true cannot be turned off by
+    # its bare form. These two assert that the parameter actually reaches
+    # PowerCLI, across the -File boundary where only the :$false form binds.
+    Assert-That 'certificate errors are ignored by default' `
+        ($r.CertPolicy -eq 'Ignore') "InvalidCertificateAction was '$($r.CertPolicy)'"
+
+    $strict = Invoke-Scenario 'Healthy' -Label 'HealthyStrictCert' -ExtraArgs @('-TrustAllCertificates:$false')
+    Assert-That '-TrustAllCertificates:$false requires a valid chain' `
+        ($strict.CertPolicy -eq 'Fail') "InvalidCertificateAction was '$($strict.CertPolicy)'"
+    Assert-That 'the strict run still completes' ($strict.ExitCode -eq 0) `
+        "exit code was $($strict.ExitCode)"
+
+    # The one that pins the [bool]: as a [switch] defaulting to $true, the bare
+    # form bound to $true and did nothing, so an operator who wrote
+    # -TrustAllCertificates expecting it to mean something got silence. A
+    # [bool] requires a value, making that a binding error instead.
+    $bare = Invoke-Scenario 'Healthy' -Label 'HealthyBareFlag' -ExtraArgs @('-TrustAllCertificates')
+    Assert-That 'bare -TrustAllCertificates is rejected, not silently ignored' `
+        ($bare.ExitCode -ne 0 -and $null -eq $bare.CertPolicy) `
+        "exit $($bare.ExitCode), policy '$($bare.CertPolicy)'"
 
     # --- HostDown -----------------------------------------------------------
     Write-Host "`nScenario: HostDown" -ForegroundColor Cyan

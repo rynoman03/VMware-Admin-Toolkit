@@ -25,13 +25,5 @@
         #   - the PowerCLI test stub, whose parameters exist so calls bind the
         #     same way they would against the real cmdlets
         'PSReviewUnusedParameter'
-
-        # A real finding, not noise: all three scripts declare
-        # [switch] $TrustAllCertificates = $true (and equivalents), so -Name
-        # alone is a no-op and turning it off needs -Name:$false. Fixing it
-        # changes a documented command-line interface in three places, so it
-        # belongs in its own change rather than being folded into an unrelated
-        # one. Excluded to keep the signal here honest, not to hide it.
-        'PSAvoidDefaultValueSwitchParameter'
     )
 }
