@@ -79,6 +79,48 @@ An exact match is a `PASS` reading `(matches expected baseline)`. With a baselin
 supplied, a host with **nothing** configured is a `FAIL` rather than a `WARN` —
 you've declared a collector is required, and the requirement is entirely unmet.
 
+**Setting it up.** Don't guess at the value — read what your hosts actually
+have first, then make the correct one your baseline. Sorting by the value groups
+the hosts, so the odd ones out are obvious:
+
+```powershell
+Connect-VIServer vcenter01.corp.local
+Get-VMHost | ForEach-Object {
+    [pscustomobject]@{
+        Host   = $_.Name
+        Syslog = ($_ | Get-VMHostSysLogServer |
+                    ForEach-Object { "$($_.Host):$($_.Port)" }) -join ', '
+        NTP    = ($_ | Get-VMHostNtpServer) -join ', '
+    }
+} | Sort-Object Syslog | Format-Table -AutoSize
+```
+
+Whatever your build standard uses becomes the baseline, and every host that
+disagrees is what these parameters exist to surface. Then pass it:
+
+```powershell
+.\HealthCheck\Invoke-VMwareHealthCheck.ps1 -VCenter vcenter01.corp.local `
+    -ExpectedSyslogServer 'udp://loghost01.corp.local:514' `
+    -ExpectedNtpServer 10.10.0.10,10.10.0.11
+```
+
+Quote a syslog value, since it contains `://`; NTP servers need no quotes.
+Comma-separate to pass several.
+
+**Always checking the same environment?** Give the parameters a default in the
+`param()` block instead of typing them every run:
+
+```powershell
+[string[]] $ExpectedSyslogServer = 'udp://loghost01.corp.local:514',
+[string[]] $ExpectedNtpServer    = @('10.10.0.10','10.10.0.11'),
+```
+
+Two things change if you do: the checks stop being opt-in, so a run against a
+*different* vCenter with its own collector will `WARN` on every host; and
+switching the comparison off for a single run then means passing an empty array
+(`-ExpectedSyslogServer @()`). If you point this at more than one environment,
+leaving the defaults empty and passing the value per run stays cleaner.
+
 Matching is forgiving about spelling, so you don't get false failures from
 equivalent notations: a `udp://` / `tcp://` / `ssl://` scheme prefix is ignored,
 comparison is case-insensitive, a trailing dot on an FQDN is ignored, IPv6
