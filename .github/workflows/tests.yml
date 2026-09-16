@@ -1,0 +1,118 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  healthcheck:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+
+    defaults:
+      run:
+        # steps[*].shell allows no expressions at all, so the edition under
+        # test has to be selected here, where the matrix context is available.
+        shell: ${{ matrix.shell }}
+
+    strategy:
+      # Report every platform's result, not just the first failure - a break
+      # confined to one PowerShell edition is the interesting case.
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux / PowerShell 7
+            os: ubuntu-latest
+            shell: pwsh
+          - name: Windows / PowerShell 7
+            os: windows-latest
+            shell: pwsh
+          # The scripts support Windows PowerShell 5.1, and parts of the health
+          # check are written specifically for it (DER rather than PEM bytes for
+          # the host certificate, .Close() rather than .Dispose() on sockets).
+          # That edition only exists here, so this is the job that checks it.
+          - name: Windows / Windows PowerShell 5.1
+            os: windows-latest
+            shell: powershell
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: PowerShell version
+        run: $PSVersionTable
+
+      - name: Parse-check every script
+        run: |
+          $bad = $false
+          Get-ChildItem -Path . -Recurse -File |
+            Where-Object { $_.Extension -in '.ps1', '.psm1' } |
+            ForEach-Object {
+              $errors = $null
+              [void][System.Management.Automation.Language.Parser]::ParseFile(
+                $_.FullName, [ref] $null, [ref] $errors)
+              if ($errors) {
+                $bad = $true
+                foreach ($e in $errors) {
+                  Write-Host "::error file=$($_.FullName),line=$($e.Extent.StartLineNumber)::$($e.Message)"
+                }
+              } else {
+                Write-Host "  ok  $($_.FullName)"
+              }
+            }
+          if ($bad) { exit 1 }
+
+      - name: Run health check tests
+        run: |
+          # Windows only: on Linux this throws a terminating
+          # PlatformNotSupportedException that -ErrorAction cannot suppress.
+          try { Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force } catch { }
+          ./tests/Invoke-HealthCheckTests.ps1 -WorkPath "${{ runner.temp }}/healthcheck-tests" -KeepOutput
+
+      - name: Upload reports and logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-output-${{ matrix.os }}-${{ matrix.shell }}
+          path: ${{ runner.temp }}/healthcheck-tests
+          if-no-files-found: ignore
+
+  lint:
+    name: PSScriptAnalyzer
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install PSScriptAnalyzer
+        run: |
+          # Pinned deliberately. A new analyzer release can add rules, and CI
+          # going red because the linter changed rather than because the code
+          # did is a bad trade for a repo this size - bump it on purpose.
+          try { Set-PSRepository -Name PSGallery -InstallationPolicy Trusted } catch { }
+          Install-Module PSScriptAnalyzer -RequiredVersion 1.23.0 -Scope CurrentUser -Force
+          "PSScriptAnalyzer $((Get-Module PSScriptAnalyzer -ListAvailable).Version)"
+
+      - name: Analyze
+        run: |
+          $findings = @(Invoke-ScriptAnalyzer -Path . -Recurse -Settings ./PSScriptAnalyzerSettings.psd1)
+          foreach ($f in $findings) {
+            $level = if ($f.Severity -eq 'Error') { 'error' } else { 'warning' }
+            $rel = (Resolve-Path -LiteralPath $f.ScriptPath -Relative) -replace '^\.[\\/]', ''
+            Write-Host "::$level file=$rel,line=$($f.Line),col=$($f.Column)::[$($f.RuleName)] $($f.Message)"
+          }
+          if ($findings.Count -gt 0) {
+            Write-Host "$($findings.Count) PSScriptAnalyzer finding(s) - see annotations above."
+            exit 1
+          }
+          Write-Host 'PSScriptAnalyzer: clean.'

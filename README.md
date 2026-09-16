@@ -45,7 +45,11 @@ $cred = Get-Credential
 
 By default, untrusted/self-signed vCenter certificates are accepted so the script
 can connect to typical internal vCenters without extra setup (`-TrustAllCertificates`
-defaults to on). Pass `-TrustAllCertificates:$false` to require a valid chain instead.
+defaults to `$true`). Pass `-TrustAllCertificates:$false` to require a valid chain
+instead. Use that colon form: it binds correctly from a PowerShell session and under
+`pwsh -File`. Under `powershell.exe -File` (Windows PowerShell 5.1) it does **not** bind
+— 5.1 passes it as a literal string and the run stops with a parameter binding error
+rather than silently trusting, so from a 5.1 scheduled task use `-Command` instead.
 A failed connection to any vCenter is recorded as a `FAIL` in the report itself (not
 just the console), and if every vCenter fails to connect, the run still produces a
 report showing those failures.
@@ -185,6 +189,30 @@ Add ~10-30s for the initial PowerCLI module import. As long as `PASS`/`WARN` lin
 
 Both carry the columns **Category, Object, Check, Status, Detail**, and are written in a `finally` block — so you still get a report even if the run errors partway through. Pass `-ReportPath C:\Reports` to keep output in a fixed location instead of wherever you launched from.
 
+**Exit codes.** The health check sets an exit code so a scheduled run can tell a
+clean environment from a failing one without parsing the report:
+
+| Code | Meaning |
+|------|---------|
+| `0` | run completed, no `FAIL` results |
+| `2` | run completed, one or more `FAIL` results |
+| `1` | the script itself errored and could not finish |
+
+`2` is deliberately distinct from `1` — "the health check found problems" and "the
+health check could not run" usually call for different responses. `WARN` and `INFO`
+do not affect the exit code, and the HTML/CSV reports are already written before the
+code is set.
+
+Getting that code back out is launcher-specific, and the two options trade off:
+`-File` propagates the exit code but passes arguments as plain strings (so it can't
+take a list — `-VCenter vc1,vc2` arrives as one server literally named `vc1,vc2`),
+while `-Command` parses arguments properly but collapses any non-zero script exit to
+`1` unless you propagate `$LASTEXITCODE` yourself:
+
+```powershell
+powershell.exe -Command "& { .\HealthCheck\Invoke-VMwareHealthCheck.ps1 -VCenter vc1,vc2; exit $LASTEXITCODE }"
+```
+
 The HTML report uses a **dashboard-style layout** — a Dell-blue header bar matched to the iDRAC 10 console, with the sidebar, table headers and links all drawn from that same banner blue, and status pill badges (`PASS`/`WARN`/`FAIL`/`INFO`), similar in feel to a Dell iDRAC or OpenManage console. Color-coded **stat tiles** at the top (Fail / Warn / Info / Pass counts) are clickable and double as the severity filter — and they **stay frozen at the top of the page** like a spreadsheet header row, so the filter stays reachable from anywhere in a long report instead of forcing a scroll back up — alongside the same **`Needs attention`, `FAIL`, `WARN`, `INFO`, `PASS`, `All`** filter buttons — the report opens pre-filtered to `FAIL` + `WARN` (what needs fixing), so you can drill straight to the problems instead of scrolling past everything that passed.
 
 Results are also broken into **per-check sections** (e.g. *VMware Tools*, *Hardware Version*, *Mounted ISOs*, *Snapshots*, *NTP*, *Datastore Free*), each in its own table. The left **sidebar** lists every section grouped by category with per-section counts and `FAIL`/`WARN` badges — the **whole row is the link**, name and count and badges alike, so clicking the number works the same as clicking the title and jumps straight to that table. Severity filtering and section navigation work together: under a filter, sections with no matching rows are hidden automatically, and clicking a sidebar link reveals the target. (The CSV stays complete and unfiltered for trending; open it in Excel and use AutoFilter on the Status column for the same effect.)
@@ -237,6 +265,17 @@ If CDP is disabled, or the connected switch only speaks LLDP, the CDP-vs-switch 
 **Sample report** (fictional lab data):
 
 ![Sample MTU consistency check HTML report](docs/img/mtu-consistency-check-sample.png)
+
+## Tests
+
+`HealthCheck/Invoke-VMwareHealthCheck.ps1` has an end-to-end test suite that runs without a
+vCenter, using a stub PowerCLI module:
+
+```powershell
+pwsh -File tests/Invoke-HealthCheckTests.ps1
+```
+
+It exits non-zero if any assertion fails. See [`tests/README.md`](tests/README.md).
 
 ## Conventions
 
