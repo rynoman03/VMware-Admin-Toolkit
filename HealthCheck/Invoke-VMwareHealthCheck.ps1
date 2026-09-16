@@ -295,6 +295,9 @@ function ConvertTo-LogTargetKey {
     if (-not $t) { return $null }
 
     $t = $t -replace '^[a-zA-Z][a-zA-Z0-9+.-]*://', ''   # drop udp:// tcp:// ssl://
+    # Also strip it from inside brackets, so a value that was bracketed by
+    # mistake still normalizes to the same host rather than to garbage.
+    $t = $t -replace '^\[[a-zA-Z][a-zA-Z0-9+.-]*://', '['
     $t = $t -replace '/.*$', ''                          # drop any trailing path
 
     $hostPart = $t
@@ -599,10 +602,17 @@ try {
         $syslog       = @($h | Get-VMHostSysLogServer)
         $syslogActual = @($syslog | ForEach-Object {
             # Bracket a bare IPv6 literal before appending the port, or
-            # 'fd00::10' + ':514' reads back as one unparseable host.
+            # 'fd00::10' + ':514' reads back as one unparseable host. Only a
+            # BARE literal: ESXi often reports Host with the scheme already on
+            # it ('udp://loghost:514'), and that contains a colon too -
+            # bracketing it produced '[udp://loghost]:514', which parses back
+            # as the host '[udp:' and can never match a baseline.
             $sysHost = "$($_.Host)"
-            if ($sysHost -like '*:*' -and $sysHost -notlike '`[*') { $sysHost = "[$sysHost]" }
-            if ($_.Port) { "${sysHost}:$($_.Port)" } else { $sysHost }
+            if ($sysHost -like '*:*' -and $sysHost -notlike '*/*' -and $sysHost -notlike '`[*') {
+                $sysHost = "[$sysHost]"
+            }
+            # Don't append a port the host string already carries.
+            if ($_.Port -and $sysHost -notmatch ':\d+$') { "${sysHost}:$($_.Port)" } else { $sysHost }
         })
         if ($syslogActual.Count -eq 0) {
             if ($ExpectedSyslogServer) {
