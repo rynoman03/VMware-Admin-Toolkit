@@ -88,6 +88,24 @@ are configured at all, `WARN` when servers are set but the `ntpd` daemon isn't
 running (a baseline mismatch and a stopped daemon are reported together in one
 row, not one at a time).
 
+**Cluster config detail.** Each cluster-config row says what the setting actually
+does and what leaving it off costs you, rather than reporting a bare acronym:
+
+- **HA** (High Availability) — restarts VMs on the surviving hosts when a host fails.
+  `WARN` when disabled: the VMs a failed host was running stay down until someone
+  restarts them by hand.
+- **Admission control** — the reserve that makes HA's promise real. It holds back
+  enough spare capacity to actually restart the VMs from a failed host, and blocks
+  power-ons that would eat into that reserve. `WARN` when disabled, because HA is
+  then enabled but reserving nothing — VMs from a failed host may fail to restart
+  if the remaining hosts are already committed. This is an easy one to miss: HA
+  reads as `PASS` while the capacity to honor it isn't guaranteed.
+- **DRS** (Distributed Resource Scheduler) — balances VM load across hosts using
+  vMotion. `WARN` when disabled, and a separate `DRSAutomation` `WARN` when DRS is
+  on but not `FullyAutomated`, since it then only *recommends* migrations and
+  rebalancing waits on someone approving them.
+- **Host count** — `WARN` on a single-host cluster, where HA has nowhere to fail over.
+
 **EVC (Enhanced vMotion Compatibility).** `PASS` with the cluster's current EVC mode
 (e.g. `intel-broadwell`) if one is set, `WARN` if `Not configured`. EVC masks each
 host's CPU down to a common baseline instruction set so a running VM can vMotion
@@ -119,6 +137,29 @@ icon in the vSphere Client. Runs regardless of power state, since this doesn't
 correlate with whether the VM is powered on. `WARN` on `disconnected` (the host may
 just be temporarily unreachable).
 
+**Storage path state.** A failed HBA or fabric takes the same path off *every* LUN at
+once, so rather than printing one near-identical line per LUN (unreadable on a host
+with dozens), LUNs are grouped by how much redundancy each has **left** — the thing
+you'd actually act on — with headline counts first and the LUN list capped:
+
+```
+40 LUN(s): 2 offline, 12 degraded | OFFLINE - no active paths: naa.…d1, naa.…d2 | 3 of 4 paths active (12): naa.…01, naa.…02, naa.…03, naa.…04 +8 more
+```
+
+`FAIL` if any LUN has no active paths left, `WARN` if some are merely degraded.
+
+**VM hardware version.** `WARN` below the `-HardwareVersionWarnNum` baseline (default
+13), and rather than a bare "consider upgrading" it names a concrete target: the
+highest version the VM's host/cluster can actually run, read from the compute
+resource's `EnvironmentBrowser` rather than inferred from a hardcoded ESXi-version
+table. For a cluster that value is already the common denominator across its hosts,
+so the recommendation stays vMotion-safe. If the host/cluster can't go any higher
+than the VM already is, it says so and suggests moving the VM to a newer host first.
+
+Because the guest OS also has to support the target version — and that's only
+answerable against VMware's compatibility guide — the detail names the guest OS to
+check and flags that the upgrade needs a power-off and can't be rolled back.
+
 **Disk consolidation needed.** `WARN` when a VM has leftover snapshot delta disks
 that need consolidating — often left behind by backup software that didn't clean up
 after itself, and easy to miss since it's a separate flag from the `Snapshot` check
@@ -144,9 +185,9 @@ Add ~10-30s for the initial PowerCLI module import. As long as `PASS`/`WARN` lin
 
 Both carry the columns **Category, Object, Check, Status, Detail**, and are written in a `finally` block — so you still get a report even if the run errors partway through. Pass `-ReportPath C:\Reports` to keep output in a fixed location instead of wherever you launched from.
 
-The HTML report uses a **dashboard-style layout** — a dark navy header and left navigation sidebar, a blue accent color, and status pill badges (`PASS`/`WARN`/`FAIL`/`INFO`), similar in feel to a Dell iDRAC or OpenManage console. Color-coded **stat tiles** at the top (Fail / Warn / Info / Pass counts) are clickable and double as the severity filter, alongside the same **`Needs attention`, `FAIL`, `WARN`, `INFO`, `PASS`, `All`** filter buttons — the report opens pre-filtered to `FAIL` + `WARN` (what needs fixing), so you can drill straight to the problems instead of scrolling past everything that passed.
+The HTML report uses a **dashboard-style layout** — a dark navy header and left navigation sidebar, a blue accent color, and status pill badges (`PASS`/`WARN`/`FAIL`/`INFO`), similar in feel to a Dell iDRAC or OpenManage console. Color-coded **stat tiles** at the top (Fail / Warn / Info / Pass counts) are clickable and double as the severity filter — and they **stay frozen at the top of the page** like a spreadsheet header row, so the filter stays reachable from anywhere in a long report instead of forcing a scroll back up — alongside the same **`Needs attention`, `FAIL`, `WARN`, `INFO`, `PASS`, `All`** filter buttons — the report opens pre-filtered to `FAIL` + `WARN` (what needs fixing), so you can drill straight to the problems instead of scrolling past everything that passed.
 
-Results are also broken into **per-check sections** (e.g. *VMware Tools*, *Hardware Version*, *Mounted ISOs*, *Snapshots*, *NTP*, *Datastore Free*), each in its own table. The left **sidebar** lists every section grouped by category with per-section counts and `FAIL`/`WARN` badges — click an entry to jump straight to that table. Severity filtering and section navigation work together: under a filter, sections with no matching rows are hidden automatically, and clicking a sidebar link reveals the target. (The CSV stays complete and unfiltered for trending; open it in Excel and use AutoFilter on the Status column for the same effect.)
+Results are also broken into **per-check sections** (e.g. *VMware Tools*, *Hardware Version*, *Mounted ISOs*, *Snapshots*, *NTP*, *Datastore Free*), each in its own table. The left **sidebar** lists every section grouped by category with per-section counts and `FAIL`/`WARN` badges — the **whole row is the link**, name and count and badges alike, so clicking the number works the same as clicking the title and jumps straight to that table. Severity filtering and section navigation work together: under a filter, sections with no matching rows are hidden automatically, and clicking a sidebar link reveals the target. (The CSV stays complete and unfiltered for trending; open it in Excel and use AutoFilter on the Status column for the same effect.)
 
 **Sample report** (fictional lab data):
 
