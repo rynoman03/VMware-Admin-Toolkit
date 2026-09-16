@@ -58,6 +58,27 @@
     newer than vCenter is always FAIL regardless of this value, since that's
     unsupported outright. Default 2.
 
+.PARAMETER ExpectedSyslogServer
+    Optional baseline of the remote syslog target(s) every host is supposed to
+    be pointing at, e.g. -ExpectedSyslogServer 'udp://loghost01.corp.local:514'.
+    When supplied, the Syslog check compares each host's configured targets
+    against this list in BOTH directions and WARNs on any divergence: an
+    expected collector that is missing, or a configured collector that is not
+    in the baseline (the stale/decommissioned-collector case). Omit it and the
+    check behaves as before - it only verifies that some remote target is set.
+
+    Matching ignores a 'udp://' / 'tcp://' / 'ssl://' scheme prefix and is
+    case-insensitive, so 'udp://loghost:514', 'loghost:514' and 'LOGHOST:514'
+    all compare equal. Leave the ':port' off an expected entry to accept any
+    port on that host.
+
+.PARAMETER ExpectedNtpServer
+    Optional baseline of the NTP server(s) every host is supposed to be using,
+    e.g. -ExpectedNtpServer 10.10.0.10,10.10.0.11. Compared exactly like
+    -ExpectedSyslogServer (both directions, WARN on divergence) on top of the
+    existing "servers configured and ntpd running" checks. Omit it and the
+    check behaves as before.
+
 .PARAMETER TrustAllCertificates
     Whether to ignore untrusted/self-signed vCenter TLS certificates when
     connecting (PowerCLI's InvalidCertificateAction). Default $true, since
@@ -94,6 +115,12 @@
 .EXAMPLE
     $cred = Get-Credential
     .\Invoke-VMwareHealthCheck.ps1 -VCenter vc1,vc2 -Credential $cred -ReportPath C:\Reports
+
+.EXAMPLE
+    # Flag any host whose syslog/NTP settings have drifted from the standard build
+    .\Invoke-VMwareHealthCheck.ps1 -VCenter vcenter01.corp.local `
+        -ExpectedSyslogServer 'udp://loghost01.corp.local:514' `
+        -ExpectedNtpServer 10.10.0.10,10.10.0.11
 
 .NOTES
     Requires PowerCLI. Install with:  Install-Module VCF.PowerCLI -Scope CurrentUser
@@ -163,7 +190,13 @@ param(
     [int] $CertExpiryWarnDays       = 30,
     [int] $CertExpiryCritDays       = 7,
     [int] $HostVersionSkewFailMajors = 2,
-    [bool] $TrustAllCertificates     = $true
+    # Optional baselines. Absent = the Syslog/NTP checks behave as they always
+    # have (is anything configured at all?); supplied = each host's configured
+    # targets are also compared against the list, in both directions.
+    [string[]] $ExpectedSyslogServer,
+    [string[]] $ExpectedNtpServer,
+
+    [bool] $TrustAllCertificates    = $true
 )
 
 #region --- Setup -------------------------------------------------------------
@@ -193,6 +226,128 @@ function Add-Result {
         default { 'Gray' }
     }
     Write-Host ("[{0,-4}] {1,-12} {2,-28} {3} - {4}" -f $Status, $Category, $Object, $Check, $Detail) -ForegroundColor $color
+}
+
+# Normalizes one syslog/NTP target into a comparable host + port pair.
+# ESXi stores syslog targets in several equivalent spellings - 'udp://host:514',
+# 'host:514', a bare 'host' - and NTP servers as a bare host or IP. Comparing the
+# raw strings would report drift that isn't there, so both sides of the baseline
+# comparison go through here first.
+function ConvertTo-LogTargetKey {
+    param([string] $Target)
+
+    $t = "$Target".Trim()
+    if (-not $t) { return $null }
+
+    $t = $t -replace '^[a-zA-Z][a-zA-Z0-9+.-]*://', ''   # drop udp:// tcp:// ssl://
+    $t = $t -replace '/.*$', ''                          # drop any trailing path
+
+    $hostPart = $t
+    $portPart = $null
+    if ($t -match '^\[(?<h>.+)\](?::(?<p>\d+))?$') {      # [IPv6] or [IPv6]:port
+        $hostPart = $Matches['h']
+        if ($Matches['p']) { $portPart = $Matches['p'] }
+    } elseif ($t -match '^(?<h>[^:]+):(?<p>\d+)$') {      # host:port
+        $hostPart = $Matches['h']
+        $portPart = $Matches['p']
+    }
+    # Anything else (a bare hostname, or an unbracketed IPv6 literal) is all host.
+
+    [pscustomobject]@{
+        Host     = $hostPart.TrimEnd('.').ToLowerInvariant()
+        Port     = $portPart
+        Original = $Target
+    }
+}
+
+# Compares a host's configured targets against an expected baseline in BOTH
+# directions: what the baseline says should be there but isn't (Missing), and
+# what is configured but isn't in the baseline (Unexpected - the stale or
+# decommissioned collector a rebuilt/older host is still pointing at).
+# An expected entry with no port matches that host on any port.
+function Compare-TargetBaseline {
+    param(
+        [object[]] $Actual,
+        [string[]] $Expected
+    )
+
+    $actualKeys   = @(@($Actual)   | ForEach-Object { ConvertTo-LogTargetKey $_ } | Where-Object { $_ })
+    $expectedKeys = @(@($Expected) | ForEach-Object { ConvertTo-LogTargetKey $_ } | Where-Object { $_ })
+
+    # Explicit nested loops rather than Where-Object inside Where-Object, which
+    # would shadow $_ and silently compare the wrong side.
+    $missing    = New-Object System.Collections.Generic.List[object]
+    $unexpected = New-Object System.Collections.Generic.List[object]
+
+    foreach ($exp in $expectedKeys) {
+        $found = $false
+        foreach ($act in $actualKeys) {
+            if ($act.Host -eq $exp.Host -and ($null -eq $exp.Port -or $act.Port -eq $exp.Port)) {
+                $found = $true
+                break
+            }
+        }
+        if (-not $found) { $missing.Add($exp.Original) }
+    }
+    foreach ($act in $actualKeys) {
+        $found = $false
+        foreach ($exp in $expectedKeys) {
+            if ($act.Host -eq $exp.Host -and ($null -eq $exp.Port -or $act.Port -eq $exp.Port)) {
+                $found = $true
+                break
+            }
+        }
+        if (-not $found) { $unexpected.Add($act.Original) }
+    }
+
+    [pscustomobject]@{ Missing = $missing; Unexpected = $unexpected }
+}
+
+function Get-MaxHardwareVersion {
+    # Highest VM hardware version the VM's host/cluster can actually run, asked
+    # of the compute resource's EnvironmentBrowser rather than inferred from a
+    # hardcoded ESXi-version table (which goes stale every release). For a
+    # cluster this is already the common denominator across its hosts, so a
+    # recommendation based on it stays vMotion-safe.
+    # Returns $null if it can't be determined; cached per host name since the
+    # answer is identical for every VM on the same host.
+    param(
+        [object]    $VMHost,
+        [hashtable] $Cache
+    )
+    if (-not $VMHost) { return $null }
+    if ($Cache.ContainsKey($VMHost.Name)) { return $Cache[$VMHost.Name] }
+
+    $max = $null
+    try {
+        $computeResource = Get-View -Id $VMHost.ExtensionData.Parent -Property EnvironmentBrowser -ErrorAction Stop
+        $envBrowser      = Get-View -Id $computeResource.EnvironmentBrowser -ErrorAction Stop
+        foreach ($descriptor in @($envBrowser.QueryConfigOptionDescriptor())) {
+            if ($descriptor.Key -match 'vmx-(\d+)') {
+                $n = [int]$Matches[1]
+                if ($null -eq $max -or $n -gt $max) { $max = $n }
+            }
+        }
+    } catch {
+        $max = $null
+    }
+    $Cache[$VMHost.Name] = $max
+    return $max
+}
+
+function Format-LunList {
+    # LUN canonical names are long (naa.60014...), so show a handful and count
+    # the rest rather than printing dozens of them into one report cell.
+    param(
+        [object] $Names,
+        [int]    $MaxShown = 4
+    )
+    # Read .Count directly and enumerate through the pipeline: $Names is a
+    # List[object], and wrapping it as @($Names) throws "Argument types do not
+    # match" (same quirk noted on $script:Results below).
+    $shown = @($Names | Select-Object -First $MaxShown)
+    $extra = $Names.Count - $shown.Count
+    if ($extra -gt 0) { "$($shown -join ', ') +$extra more" } else { $shown -join ', ' }
 }
 
 # Ensure PowerCLI is present. Broadcom renamed the meta-module from
@@ -348,23 +503,77 @@ try {
         # Host services, fetched once and shared with the SSH check below.
         $hostServices = @($h | Get-VMHostService)
 
-        # NTP - configured and the daemon running
-        $ntpServers = ($h | Get-VMHostNtpServer)
+        # NTP - servers configured, daemon running, and (optionally) the
+        # configured servers matching the -ExpectedNtpServer baseline.
+        $ntpServers = @($h | Get-VMHostNtpServer)
         $ntpSvc     = $hostServices | Where-Object { $_.Key -eq 'ntpd' }
-        if (-not $ntpServers) {
-            Add-Result 'HostHealth' $h.Name 'NTP' 'FAIL' 'No NTP servers configured'
-        } elseif (-not $ntpSvc.Running) {
-            Add-Result 'HostHealth' $h.Name 'NTP' 'WARN' "Configured ($($ntpServers -join ',')) but ntpd not running"
+        if ($ntpServers.Count -eq 0) {
+            $detail = 'No NTP servers configured'
+            if ($ExpectedNtpServer) { $detail += " - expected: $($ExpectedNtpServer -join ', ')" }
+            Add-Result 'HostHealth' $h.Name 'NTP' 'FAIL' $detail
         } else {
-            Add-Result 'HostHealth' $h.Name 'NTP' 'PASS' "Running; servers: $($ntpServers -join ',')"
+            $ntpIssues = New-Object System.Collections.Generic.List[object]
+            if ($null -eq $ntpSvc) {
+                $ntpIssues.Add('ntpd service not present on this host - time will drift')
+            } elseif (-not $ntpSvc.Running) {
+                $ntpIssues.Add('ntpd service not running - the configured servers are not being used')
+            }
+            if ($ExpectedNtpServer) {
+                $ntpCmp = Compare-TargetBaseline -Actual $ntpServers -Expected $ExpectedNtpServer
+                if ($ntpCmp.Missing.Count -gt 0) {
+                    $ntpIssues.Add("missing expected server(s): $($ntpCmp.Missing -join ', ')")
+                }
+                if ($ntpCmp.Unexpected.Count -gt 0) {
+                    $ntpIssues.Add("server(s) not in the baseline: $($ntpCmp.Unexpected -join ', ') - possibly an older build still pointing at a retired time source")
+                }
+            }
+
+            if ($ntpIssues.Count -gt 0) {
+                $detail = "Configured: $($ntpServers -join ', ') | $($ntpIssues -join ' | ')"
+                if ($ExpectedNtpServer) { $detail += " | Expected: $($ExpectedNtpServer -join ', ')" }
+                Add-Result 'HostHealth' $h.Name 'NTP' 'WARN' $detail
+            } elseif ($ExpectedNtpServer) {
+                Add-Result 'HostHealth' $h.Name 'NTP' 'PASS' "Running; servers: $($ntpServers -join ', ') (matches expected baseline)"
+            } else {
+                Add-Result 'HostHealth' $h.Name 'NTP' 'PASS' "Running; servers: $($ntpServers -join ', ')"
+            }
         }
 
-        # Syslog - remote target configured
-        $syslog = ($h | Get-VMHostSysLogServer)
-        if (-not $syslog) {
-            Add-Result 'HostHealth' $h.Name 'Syslog' 'WARN' 'No remote syslog target configured'
+        # Syslog - remote target configured, and (optionally) matching the
+        # -ExpectedSyslogServer baseline.
+        $syslog       = @($h | Get-VMHostSysLogServer)
+        $syslogActual = @($syslog | ForEach-Object {
+            # Bracket a bare IPv6 literal before appending the port, or
+            # 'fd00::10' + ':514' reads back as one unparseable host.
+            $sysHost = "$($_.Host)"
+            if ($sysHost -like '*:*' -and $sysHost -notlike '`[*') { $sysHost = "[$sysHost]" }
+            if ($_.Port) { "${sysHost}:$($_.Port)" } else { $sysHost }
+        })
+        if ($syslogActual.Count -eq 0) {
+            if ($ExpectedSyslogServer) {
+                # A baseline was supplied, so a remote collector is required here -
+                # nothing configured means the requirement is entirely unmet.
+                Add-Result 'HostHealth' $h.Name 'Syslog' 'FAIL' "No remote syslog target configured - expected: $($ExpectedSyslogServer -join ', ')"
+            } else {
+                Add-Result 'HostHealth' $h.Name 'Syslog' 'WARN' 'No remote syslog target configured'
+            }
+        } elseif (-not $ExpectedSyslogServer) {
+            Add-Result 'HostHealth' $h.Name 'Syslog' 'PASS' "Target: $($syslogActual -join ', ')"
         } else {
-            Add-Result 'HostHealth' $h.Name 'Syslog' 'PASS' "Target: $(($syslog | ForEach-Object { "$($_.Host):$($_.Port)" }) -join ',')"
+            $sysCmp    = Compare-TargetBaseline -Actual $syslogActual -Expected $ExpectedSyslogServer
+            $sysIssues = New-Object System.Collections.Generic.List[object]
+            if ($sysCmp.Missing.Count -gt 0) {
+                $sysIssues.Add("missing expected target(s): $($sysCmp.Missing -join ', ')")
+            }
+            if ($sysCmp.Unexpected.Count -gt 0) {
+                $sysIssues.Add("target(s) not in the baseline: $($sysCmp.Unexpected -join ', ') - possibly an older build still shipping logs to a retired collector")
+            }
+
+            if ($sysIssues.Count -gt 0) {
+                Add-Result 'HostHealth' $h.Name 'Syslog' 'WARN' "Configured: $($syslogActual -join ', ') | $($sysIssues -join ' | ') | Expected: $($ExpectedSyslogServer -join ', ')"
+            } else {
+                Add-Result 'HostHealth' $h.Name 'Syslog' 'PASS' "Target: $($syslogActual -join ', ') (matches expected baseline)"
+            }
         }
 
         # Uptime (informational; very long uptime can mean missed patching)
@@ -383,32 +592,68 @@ try {
         # paths while one or more of its FC/iSCSI paths are dead, silently
         # running with reduced (or zero) redundancy. DatastoreConnectivity
         # above won't catch that; this walks the actual multipathing state.
+        # A dead HBA or fabric takes the same path off every LUN at once, so
+        # LUNs are grouped by how much redundancy each has LEFT (what you'd
+        # actually act on) rather than emitting one near-identical line per
+        # LUN, which turns into an unreadable wall of text on a host with
+        # dozens of LUNs.
         $lunQueryError = $null
         $luns = @($h | Get-ScsiLun -LunType disk -ErrorAction SilentlyContinue -ErrorVariable lunQueryError)
         $pathIssues  = New-Object System.Collections.Generic.List[object]
         $totalPaths  = 0
-        $anyLunDown  = $false
+        $offlineLuns = New-Object System.Collections.Generic.List[object]
+        $degraded    = @{}   # "N of M paths active" -> list of LUN names
         foreach ($lun in $luns) {
-            $paths  = @(Get-ScsiLunPath -ScsiLun $lun -ErrorAction SilentlyContinue)
+            $paths = @(Get-ScsiLunPath -ScsiLun $lun -ErrorAction SilentlyContinue)
             if ($paths.Count -eq 0) {
                 # Don't let a LUN whose paths can't be read count as healthy.
-                $pathIssues.Add("$($lun.CanonicalName): path state unavailable")
+                $pathIssues.Add($lun.CanonicalName)
                 continue
             }
             $totalPaths += $paths.Count
-            $dead   = @($paths | Where-Object { $_.State -in @('Dead','Disabled') })
-            $active = @($paths | Where-Object { $_.State -notin @('Dead','Disabled') })
+            $dead = @($paths | Where-Object { $_.State -in @('Dead','Disabled') })
             if ($dead.Count -eq 0) { continue }
-            if ($active.Count -eq 0) {
-                $anyLunDown = $true
-                $pathIssues.Add("$($lun.CanonicalName): all $($paths.Count) paths down")
+
+            $activeCount = $paths.Count - $dead.Count
+            if ($activeCount -le 0) {
+                $offlineLuns.Add($lun.CanonicalName)
             } else {
-                $pathIssues.Add("$($lun.CanonicalName): $($dead.Count) of $($paths.Count) paths down")
+                $key = "$activeCount of $($paths.Count) paths active"
+                if (-not $degraded.ContainsKey($key)) {
+                    $degraded[$key] = New-Object System.Collections.Generic.List[object]
+                }
+                $degraded[$key].Add($lun.CanonicalName)
             }
         }
-        if ($pathIssues.Count -gt 0) {
-            $severity = if ($anyLunDown) { 'FAIL' } else { 'WARN' }
-            Add-Result 'HostHealth' $h.Name 'PathState' $severity ($pathIssues -join '; ')
+        $degradedCount = 0
+        foreach ($k in $degraded.Keys) { $degradedCount += $degraded[$k].Count }
+
+        if ($offlineLuns.Count -gt 0 -or $degradedCount -gt 0 -or $pathIssues.Count -gt 0) {
+            # Headline counts first, then one grouped line per redundancy level,
+            # worst first. E.g.:
+            #   40 LUN(s): 2 offline, 12 degraded | OFFLINE - no active paths:
+            #   naa.aaa, naa.bbb | 3 of 4 paths active (12): naa.ccc, ... +8 more
+            $counts = New-Object System.Collections.Generic.List[object]
+            if ($offlineLuns.Count -gt 0) { $counts.Add("$($offlineLuns.Count) offline") }
+            if ($degradedCount -gt 0)     { $counts.Add("$degradedCount degraded") }
+            if ($pathIssues.Count -gt 0)  { $counts.Add("$($pathIssues.Count) unreadable") }
+
+            $parts = New-Object System.Collections.Generic.List[object]
+            $parts.Add("$($luns.Count) LUN(s): $($counts -join ', ')")
+            if ($offlineLuns.Count -gt 0) {
+                $parts.Add("OFFLINE - no active paths: $(Format-LunList $offlineLuns)")
+            }
+            # Sort by the leading active-path count in the key, fewest first.
+            foreach ($key in ($degraded.Keys | Sort-Object { [int]($_ -split ' ')[0] })) {
+                $parts.Add("$key ($($degraded[$key].Count)): $(Format-LunList $degraded[$key])")
+            }
+
+            if ($pathIssues.Count -gt 0) {
+                $parts.Add("path state could not be read ($($pathIssues.Count)): $(Format-LunList $pathIssues)")
+            }
+
+            $severity = if ($offlineLuns.Count -gt 0) { 'FAIL' } else { 'WARN' }
+            Add-Result 'HostHealth' $h.Name 'PathState' $severity ($parts -join ' | ')
         } elseif ($luns.Count -gt 0) {
             Add-Result 'HostHealth' $h.Name 'PathState' 'PASS' "$totalPaths path(s) across $($luns.Count) LUN(s), all active"
         } elseif ($lunQueryError) {
@@ -525,6 +770,10 @@ try {
     $snapsByVm  = @{}
     $cdByVm     = @{}
     $floppyByVm = @{}
+    # Highest hardware version each host/cluster supports, filled in on first
+    # use by Get-MaxHardwareVersion so only hosts with an out-of-date VM on
+    # them cost an extra round-trip.
+    $maxHwCache = @{}
     if ($vms) {
         Write-Host "  Pre-fetching snapshots and media for $(@($vms).Count) VM(s)..." -ForegroundColor DarkGray
         foreach ($s in (Get-Snapshot -VM $vms)) {
@@ -609,9 +858,13 @@ try {
             }
         }
 
-        # VM hardware version (vmx-NN). Flag noticeably old ones. PowerCLI has
-        # reported this property as both 'vmx-19' and a bare '19' across
-        # releases, so accept either - and report a value that matches neither
+        # VM hardware version (vmx-NN). Flag noticeably old ones, and name a
+        # concrete target rather than a bare "consider upgrading" - the ceiling
+        # is whatever the host/cluster supports, and the guest OS has to be
+        # supported on that version too, which only the admin can confirm
+        # against VMware's compatibility guide.
+        # PowerCLI has reported this property as both 'vmx-19' and a bare '19'
+        # across releases, so accept either, and report a value matching neither
         # as INFO rather than letting it fall through to PASS unexamined.
         $hwVersion = $vm.HardwareVersion
         $hwNum = 0
@@ -619,9 +872,24 @@ try {
         if ($hwNum -le 0) {
             Add-Result 'VMCompliance' $vm.Name 'HardwareVersion' 'INFO' "Could not parse hardware version '$hwVersion'"
         } elseif ($hwNum -lt $HardwareVersionWarnNum) {
-            Add-Result 'VMCompliance' $vm.Name 'HardwareVersion' 'WARN' "$hwVersion (consider upgrading)"
+            $maxHw = Get-MaxHardwareVersion -VMHost $vm.VMHost -Cache $maxHwCache
+            $guestOs = $vm.ExtensionData.Config.GuestFullName
+            $guestClause = if ($guestOs) {
+                "Confirm '$guestOs' is supported on the target version"
+            } else {
+                'Confirm the guest OS is supported on the target version'
+            }
+
+            $advice = if ($null -eq $maxHw) {
+                "Could not determine the highest version its host/cluster supports - check that before upgrading."
+            } elseif ($maxHw -le $hwNum) {
+                "Its host/cluster supports no higher than vmx-$maxHw, so it cannot be upgraded where it runs today - move it to a newer host first."
+            } else {
+                "Host/cluster supports up to vmx-$maxHw."
+            }
+            Add-Result 'VMCompliance' $vm.Name 'HardwareVersion' 'WARN' "$hwVersion is below the vmx-$HardwareVersionWarnNum baseline. $advice $guestClause before upgrading; it requires a power-off and cannot be rolled back."
         } else {
-            Add-Result 'VMCompliance' $vm.Name 'HardwareVersion' 'PASS' "$hwVersion"
+            Add-Result 'VMCompliance' $vm.Name 'HardwareVersion' 'PASS' "$hwVersion (at or above the vmx-$HardwareVersionWarnNum baseline)"
         }
 
         # Mounted ISO / connected CD-ROM (blocks vMotion, often left behind).
@@ -711,29 +979,29 @@ try {
     foreach ($cl in (Get-Cluster -Server $connections)) {
         # HA
         if ($cl.HAEnabled) {
-            Add-Result 'ClusterConfig' $cl.Name 'HA' 'PASS' 'HA enabled'
+            Add-Result 'ClusterConfig' $cl.Name 'HA' 'PASS' 'High Availability enabled (restarts VMs on the surviving hosts if a host fails)'
         } else {
-            Add-Result 'ClusterConfig' $cl.Name 'HA' 'WARN' 'HA disabled'
+            Add-Result 'ClusterConfig' $cl.Name 'HA' 'WARN' 'High Availability disabled - if a host fails, the VMs it was running will stay down until someone restarts them by hand'
         }
 
         # Admission control (only relevant when HA is on)
         if ($cl.HAEnabled) {
             $ac = $cl.ExtensionData.Configuration.DasConfig.AdmissionControlEnabled
             if ($ac) {
-                Add-Result 'ClusterConfig' $cl.Name 'AdmissionControl' 'PASS' 'Enabled'
+                Add-Result 'ClusterConfig' $cl.Name 'AdmissionControl' 'PASS' 'Enabled - HA holds back enough spare capacity to restart the VMs from a failed host, and blocks power-ons that would eat into that reserve'
             } else {
-                Add-Result 'ClusterConfig' $cl.Name 'AdmissionControl' 'WARN' 'Disabled (no failover capacity guarantee)'
+                Add-Result 'ClusterConfig' $cl.Name 'AdmissionControl' 'WARN' 'Disabled - HA reserves no spare capacity, so VMs from a failed host may fail to restart if the remaining hosts are already committed'
             }
         }
 
         # DRS
         if ($cl.DrsEnabled) {
-            Add-Result 'ClusterConfig' $cl.Name 'DRS' 'PASS' "Enabled ($($cl.DrsAutomationLevel))"
+            Add-Result 'ClusterConfig' $cl.Name 'DRS' 'PASS' "Distributed Resource Scheduler enabled, $($cl.DrsAutomationLevel) (balances VM load across hosts using vMotion)"
             if ($cl.DrsAutomationLevel -ne 'FullyAutomated') {
-                Add-Result 'ClusterConfig' $cl.Name 'DRSAutomation' 'WARN' "Not FullyAutomated ($($cl.DrsAutomationLevel))"
+                Add-Result 'ClusterConfig' $cl.Name 'DRSAutomation' 'WARN' "DRS is set to $($cl.DrsAutomationLevel), not FullyAutomated - it only recommends migrations instead of performing them, so rebalancing waits on someone approving them"
             }
         } else {
-            Add-Result 'ClusterConfig' $cl.Name 'DRS' 'WARN' 'DRS disabled'
+            Add-Result 'ClusterConfig' $cl.Name 'DRS' 'WARN' 'Distributed Resource Scheduler disabled - VM load is not balanced across hosts automatically'
         }
 
         # Host count / EVC sanity
@@ -780,7 +1048,14 @@ finally {
     $style = @"
 <style>
  :root {
-  --navy: #0b1f33; --navy-2: #123252; --accent: #045a9e;
+  /* Every blue in the report is one of the two stops of the iDRAC 10
+     banner gradient, so nothing reads as a second, unrelated blue.
+     --brand (the top stop) is reserved for the banner itself: at 4.14:1 on
+     the page background it is too light for body-size text. --brand-2 (the
+     bottom stop) carries everything else - sidebar, table headers, links,
+     borders - and clears AA on light and dark alike. */
+  --brand: #0076ce; --brand-2: #0062ad; --brand-3: #00559a;
+  --accent: #0062ad;
   --bg: #eef1f5; --surface: #ffffff; --border: #dbe1e8;
   --text: #1c2733; --muted: #64748b;
   --ok: #1e7c34; --ok-bg: #e6f4ea;
@@ -791,24 +1066,34 @@ finally {
  * { box-sizing: border-box; }
  body { font-family: Segoe UI, Arial, sans-serif; margin: 0; background: var(--bg); color: var(--text); }
  a { color: var(--accent); }
- .topbar { background: linear-gradient(180deg, var(--navy) 0%, var(--navy-2) 100%); color: #fff; padding: 14px 24px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+ .topbar { background: linear-gradient(180deg, var(--brand) 0%, var(--brand-2) 100%); color: #fff; padding: 14px 24px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
  .topbar-brand { display: flex; align-items: center; gap: 12px; }
- .brand-badge { display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 34px; border-radius: 6px; background: var(--accent); color: #fff; font-weight: 700; font-size: 13px; letter-spacing: .5px; flex: none; }
+ .brand-badge { display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 34px; border-radius: 6px; background: rgba(255,255,255,.18); border: 1px solid rgba(255,255,255,.35); color: #fff; font-weight: 700; font-size: 13px; letter-spacing: .5px; flex: none; }
  .brand-title { font-size: 18px; font-weight: 600; }
  .topbar-meta { font-size: 12px; color: #c7d2df; }
  .layout { display: flex; align-items: flex-start; }
- .sidebar { width: 270px; flex: 0 0 270px; background: var(--navy); color: #dbe6f0; padding: 18px 0; position: sticky; top: 0; align-self: flex-start; max-height: 100vh; overflow-y: auto; }
+ .sidebar { width: 270px; flex: 0 0 270px; background: var(--brand-2); color: #eaf3fb; padding: 18px 0; position: sticky; top: 0; align-self: flex-start; max-height: 100vh; overflow-y: auto; }
  .sidebar h3 { margin: 0 18px 10px; font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: #8fa3ba; }
  .sidebar .toc-cat { margin: 0 0 14px; }
  .sidebar .toc-cat-name { display: block; padding: 6px 18px; font-weight: 600; font-size: 12px; color: #a9bdd2; text-transform: uppercase; letter-spacing: .04em; }
  .sidebar ul { list-style: none; margin: 4px 0 0; padding: 0; }
  .sidebar li { margin: 0; }
- .sidebar a { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 6px 18px; font-size: 13px; color: #dbe6f0; text-decoration: none; border-left: 3px solid transparent; cursor: pointer; }
- .sidebar a:hover { background: var(--navy-2); border-left-color: var(--accent); }
- .sidebar .muted { color: #7c93ab; font-size: 11px; }
+ .sidebar a { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 6px 18px; font-size: 13px; color: #eaf3fb; text-decoration: none; border-left: 3px solid transparent; cursor: pointer; }
+ .sidebar a:hover { background: var(--brand-3); border-left-color: #9fd4f7; }
+ .sidebar .toc-name { min-width: 0; overflow-wrap: anywhere; }
+ .sidebar .toc-meta { display: inline-flex; align-items: center; flex: none; }
+ .sidebar .muted { color: #cfe0ee; font-size: 11px; }
  .content { flex: 1; min-width: 0; padding: 24px; }
  .meta-line { color: var(--muted); font-size: 13px; margin: 0 0 16px; }
- .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 18px; }
+ .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px;
+          /* Frozen like a spreadsheet header row: the tiles double as the severity
+             filter, so keeping them on screen keeps the filter reachable from
+             anywhere in a long report. Negative margin + matching padding bleeds
+             the background across .content's 24px gutters, so rows scrolling
+             underneath don't show through at the edges. */
+          position: sticky; top: 0; z-index: 20; background: var(--bg);
+          margin: 0 -24px 18px; padding: 12px 24px 14px;
+          box-shadow: 0 1px 0 var(--border), 0 4px 10px -6px rgba(16,24,40,.28); }
  .stat-tile { background: var(--surface); border: 1px solid var(--border); border-left: 4px solid var(--muted); border-radius: 8px; padding: 14px 16px; cursor: pointer; text-align: left; font: inherit; }
  .stat-tile .stat-num { display: block; font-size: 26px; font-weight: 700; line-height: 1.1; }
  .stat-tile .stat-label { display: block; font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; margin-top: 2px; }
@@ -825,10 +1110,10 @@ finally {
  .filters button { font: inherit; font-size: 13px; padding: 7px 14px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); color: var(--text); cursor: pointer; }
  .filters button:hover { border-color: var(--accent); color: var(--accent); }
  .filters button.active { background: var(--accent); color: #fff; border-color: var(--accent); }
- h2 { color: var(--navy); margin: 28px 0 4px; padding-left: 10px; border-left: 4px solid var(--accent); font-size: 16px; }
+ h2 { color: var(--brand-2); margin: 28px 0 4px; padding-left: 10px; border-left: 4px solid var(--accent); font-size: 16px; scroll-margin-top: 118px; }
  table { border-collapse: collapse; width: 100%; margin-top: 6px; background: var(--surface); border-radius: 6px; overflow: hidden; box-shadow: 0 1px 2px rgba(16,24,40,.05); }
  th, td { border-bottom: 1px solid var(--border); padding: 8px 12px; text-align: left; font-size: 13px; }
- th { background: var(--navy); color: #fff; font-weight: 600; }
+ th { background: var(--brand-2); color: #fff; font-weight: 600; }
  tr:hover td { background: #f5f8fb; }
  .badge { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 11px; font-weight: 700; letter-spacing: .03em; }
  .badge-PASS { background: var(--ok-bg); color: var(--ok); }
@@ -845,6 +1130,8 @@ finally {
  @media (max-width: 820px) {
   .layout { flex-direction: column; }
   .sidebar { width: 100%; flex-basis: auto; position: static; max-height: none; }
+  .stats { position: static; margin: 0 0 18px; padding: 0; box-shadow: none; }
+  h2 { scroll-margin-top: 8px; }
  }
 </style>
 "@
@@ -887,7 +1174,7 @@ finally {
             $badges = ''
             if ($f -gt 0) { $badges += "<span class='b bFAIL'>$f FAIL</span>" }
             if ($w -gt 0) { $badges += "<span class='b bWARN'>$w WARN</span>" }
-            "<li><a data-jump='$($sec.Id)' href='#$($sec.Id)'>$($sec.Check)</a> <span class='muted'>($($sec.Rows.Count))</span>$badges</li>"
+            "<li><a data-jump='$($sec.Id)' href='#$($sec.Id)'><span class='toc-name'>$($sec.Check)</span><span class='toc-meta'><span class='muted'>($($sec.Rows.Count))</span>$badges</span></a></li>"
         }
         "<div class='toc-cat'><span class='toc-cat-name'>$($catGrp.Name)</span><ul>$($items -join '')</ul></div>"
     }

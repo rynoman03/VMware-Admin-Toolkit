@@ -336,7 +336,14 @@ finally {
     $style = @"
 <style>
  :root {
-  --navy: #0b1f33; --navy-2: #123252; --accent: #045a9e;
+  /* Every blue in the report is one of the two stops of the iDRAC 10
+     banner gradient, so nothing reads as a second, unrelated blue.
+     --brand (the top stop) is reserved for the banner itself: at 4.14:1 on
+     the page background it is too light for body-size text. --brand-2 (the
+     bottom stop) carries everything else - sidebar, table headers, links,
+     borders - and clears AA on light and dark alike. */
+  --brand: #0076ce; --brand-2: #0062ad; --brand-3: #00559a;
+  --accent: #0062ad;
   --bg: #eef1f5; --surface: #ffffff; --border: #dbe1e8;
   --text: #1c2733; --muted: #64748b;
   --ok: #1e7c34; --ok-bg: #e6f4ea;
@@ -347,24 +354,34 @@ finally {
  * { box-sizing: border-box; }
  body { font-family: Segoe UI, Arial, sans-serif; margin: 0; background: var(--bg); color: var(--text); }
  a { color: var(--accent); }
- .topbar { background: linear-gradient(180deg, var(--navy) 0%, var(--navy-2) 100%); color: #fff; padding: 14px 24px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+ .topbar { background: linear-gradient(180deg, var(--brand) 0%, var(--brand-2) 100%); color: #fff; padding: 14px 24px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
  .topbar-brand { display: flex; align-items: center; gap: 12px; }
- .brand-badge { display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 34px; border-radius: 6px; background: var(--accent); color: #fff; font-weight: 700; font-size: 13px; letter-spacing: .5px; flex: none; }
+ .brand-badge { display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 34px; border-radius: 6px; background: rgba(255,255,255,.18); border: 1px solid rgba(255,255,255,.35); color: #fff; font-weight: 700; font-size: 13px; letter-spacing: .5px; flex: none; }
  .brand-title { font-size: 18px; font-weight: 600; }
  .topbar-meta { font-size: 12px; color: #c7d2df; }
  .layout { display: flex; align-items: flex-start; }
- .sidebar { width: 270px; flex: 0 0 270px; background: var(--navy); color: #dbe6f0; padding: 18px 0; position: sticky; top: 0; align-self: flex-start; max-height: 100vh; overflow-y: auto; }
+ .sidebar { width: 270px; flex: 0 0 270px; background: var(--brand-2); color: #eaf3fb; padding: 18px 0; position: sticky; top: 0; align-self: flex-start; max-height: 100vh; overflow-y: auto; }
  .sidebar h3 { margin: 0 18px 10px; font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: #8fa3ba; }
  .sidebar .toc-cat { margin: 0 0 14px; }
  .sidebar .toc-cat-name { display: block; padding: 6px 18px; font-weight: 600; font-size: 12px; color: #a9bdd2; text-transform: uppercase; letter-spacing: .04em; }
  .sidebar ul { list-style: none; margin: 4px 0 0; padding: 0; }
  .sidebar li { margin: 0; }
- .sidebar a { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 6px 18px; font-size: 13px; color: #dbe6f0; text-decoration: none; border-left: 3px solid transparent; cursor: pointer; }
- .sidebar a:hover { background: var(--navy-2); border-left-color: var(--accent); }
- .sidebar .muted { color: #7c93ab; font-size: 11px; }
+ .sidebar a { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 6px 18px; font-size: 13px; color: #eaf3fb; text-decoration: none; border-left: 3px solid transparent; cursor: pointer; }
+ .sidebar a:hover { background: var(--brand-3); border-left-color: #9fd4f7; }
+ .sidebar .toc-name { min-width: 0; overflow-wrap: anywhere; }
+ .sidebar .toc-meta { display: inline-flex; align-items: center; flex: none; }
+ .sidebar .muted { color: #cfe0ee; font-size: 11px; }
  .content { flex: 1; min-width: 0; padding: 24px; }
  .meta-line { color: var(--muted); font-size: 13px; margin: 0 0 16px; }
- .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 18px; }
+ .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px;
+          /* Frozen like a spreadsheet header row: the tiles double as the severity
+             filter, so keeping them on screen keeps the filter reachable from
+             anywhere in a long report. Negative margin + matching padding bleeds
+             the background across .content's 24px gutters, so rows scrolling
+             underneath don't show through at the edges. */
+          position: sticky; top: 0; z-index: 20; background: var(--bg);
+          margin: 0 -24px 18px; padding: 12px 24px 14px;
+          box-shadow: 0 1px 0 var(--border), 0 4px 10px -6px rgba(16,24,40,.28); }
  .stat-tile { background: var(--surface); border: 1px solid var(--border); border-left: 4px solid var(--muted); border-radius: 8px; padding: 14px 16px; cursor: pointer; text-align: left; font: inherit; }
  .stat-tile .stat-num { display: block; font-size: 26px; font-weight: 700; line-height: 1.1; }
  .stat-tile .stat-label { display: block; font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; margin-top: 2px; }
@@ -381,10 +398,10 @@ finally {
  .filters button { font: inherit; font-size: 13px; padding: 7px 14px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); color: var(--text); cursor: pointer; }
  .filters button:hover { border-color: var(--accent); color: var(--accent); }
  .filters button.active { background: var(--accent); color: #fff; border-color: var(--accent); }
- h2 { color: var(--navy); margin: 28px 0 4px; padding-left: 10px; border-left: 4px solid var(--accent); font-size: 16px; }
+ h2 { color: var(--brand-2); margin: 28px 0 4px; padding-left: 10px; border-left: 4px solid var(--accent); font-size: 16px; scroll-margin-top: 118px; }
  table { border-collapse: collapse; width: 100%; margin-top: 6px; background: var(--surface); border-radius: 6px; overflow: hidden; box-shadow: 0 1px 2px rgba(16,24,40,.05); }
  th, td { border-bottom: 1px solid var(--border); padding: 8px 12px; text-align: left; font-size: 13px; }
- th { background: var(--navy); color: #fff; font-weight: 600; }
+ th { background: var(--brand-2); color: #fff; font-weight: 600; }
  tr:hover td { background: #f5f8fb; }
  .badge { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 11px; font-weight: 700; letter-spacing: .03em; }
  .badge-PASS { background: var(--ok-bg); color: var(--ok); }
@@ -401,6 +418,8 @@ finally {
  @media (max-width: 820px) {
   .layout { flex-direction: column; }
   .sidebar { width: 100%; flex-basis: auto; position: static; max-height: none; }
+  .stats { position: static; margin: 0 0 18px; padding: 0; box-shadow: none; }
+  h2 { scroll-margin-top: 8px; }
  }
 </style>
 "@
@@ -443,7 +462,7 @@ finally {
             $badges = ''
             if ($f -gt 0) { $badges += "<span class='b bFAIL'>$f FAIL</span>" }
             if ($w -gt 0) { $badges += "<span class='b bWARN'>$w WARN</span>" }
-            "<li><a data-jump='$($sec.Id)' href='#$($sec.Id)'>$($sec.Check)</a> <span class='muted'>($($sec.Rows.Count))</span>$badges</li>"
+            "<li><a data-jump='$($sec.Id)' href='#$($sec.Id)'><span class='toc-name'>$($sec.Check)</span><span class='toc-meta'><span class='muted'>($($sec.Rows.Count))</span>$badges</span></a></li>"
         }
         "<div class='toc-cat'><span class='toc-cat-name'>$($catGrp.Name)</span><ul>$($items -join '')</ul></div>"
     }
