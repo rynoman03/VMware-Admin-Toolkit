@@ -275,10 +275,20 @@ finally {
  .sidebar li { margin: 0; }
  .sidebar a { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 6px 18px; font-size: 13px; color: #dbe6f0; text-decoration: none; border-left: 3px solid transparent; cursor: pointer; }
  .sidebar a:hover { background: var(--navy-2); border-left-color: var(--accent); }
+ .sidebar .toc-name { min-width: 0; overflow-wrap: anywhere; }
+ .sidebar .toc-meta { display: inline-flex; align-items: center; flex: none; }
  .sidebar .muted { color: #7c93ab; font-size: 11px; }
  .content { flex: 1; min-width: 0; padding: 24px; }
  .meta-line { color: var(--muted); font-size: 13px; margin: 0 0 16px; }
- .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 18px; }
+ .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px;
+          /* Frozen like a spreadsheet header row: the tiles double as the severity
+             filter, so keeping them on screen keeps the filter reachable from
+             anywhere in a long report. Negative margin + matching padding bleeds
+             the background across .content's 24px gutters, so rows scrolling
+             underneath don't show through at the edges. */
+          position: sticky; top: 0; z-index: 20; background: var(--bg);
+          margin: 0 -24px 18px; padding: 12px 24px 14px;
+          box-shadow: 0 1px 0 var(--border), 0 4px 10px -6px rgba(16,24,40,.28); }
  .stat-tile { background: var(--surface); border: 1px solid var(--border); border-left: 4px solid var(--muted); border-radius: 8px; padding: 14px 16px; cursor: pointer; text-align: left; font: inherit; }
  .stat-tile .stat-num { display: block; font-size: 26px; font-weight: 700; line-height: 1.1; }
  .stat-tile .stat-label { display: block; font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; margin-top: 2px; }
@@ -295,7 +305,7 @@ finally {
  .filters button { font: inherit; font-size: 13px; padding: 7px 14px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); color: var(--text); cursor: pointer; }
  .filters button:hover { border-color: var(--accent); color: var(--accent); }
  .filters button.active { background: var(--accent); color: #fff; border-color: var(--accent); }
- h2 { color: var(--navy); margin: 28px 0 4px; padding-left: 10px; border-left: 4px solid var(--accent); font-size: 16px; }
+ h2 { color: var(--navy); margin: 28px 0 4px; padding-left: 10px; border-left: 4px solid var(--accent); font-size: 16px; scroll-margin-top: 118px; }
  table { border-collapse: collapse; width: 100%; margin-top: 6px; background: var(--surface); border-radius: 6px; overflow: hidden; box-shadow: 0 1px 2px rgba(16,24,40,.05); }
  th, td { border-bottom: 1px solid var(--border); padding: 8px 12px; text-align: left; font-size: 13px; }
  th { background: var(--navy); color: #fff; font-weight: 600; }
@@ -315,6 +325,8 @@ finally {
  @media (max-width: 820px) {
   .layout { flex-direction: column; }
   .sidebar { width: 100%; flex-basis: auto; position: static; max-height: none; }
+  .stats { position: static; margin: 0 0 18px; padding: 0; box-shadow: none; }
+  h2 { scroll-margin-top: 8px; }
  }
 </style>
 "@
@@ -357,7 +369,7 @@ finally {
             $badges = ''
             if ($f -gt 0) { $badges += "<span class='b bFAIL'>$f FAIL</span>" }
             if ($w -gt 0) { $badges += "<span class='b bWARN'>$w WARN</span>" }
-            "<li><a data-jump='$($sec.Id)' href='#$($sec.Id)'>$($sec.Check)</a> <span class='muted'>($($sec.Rows.Count))</span>$badges</li>"
+            "<li><a data-jump='$($sec.Id)' href='#$($sec.Id)'><span class='toc-name'>$($sec.Check)</span><span class='toc-meta'><span class='muted'>($($sec.Rows.Count))</span>$badges</span></a></li>"
         }
         "<div class='toc-cat'><span class='toc-cat-name'>$($catGrp.Name)</span><ul>$($items -join '')</ul></div>"
     }
