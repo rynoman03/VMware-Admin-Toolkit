@@ -112,6 +112,30 @@ Add ~10-30s for the initial PowerCLI module import. As long as `PASS`/`WARN` lin
 
 Both carry the columns **Category, Object, Check, Status, Detail**, and are written in a `finally` block — so you still get a report even if the run errors partway through. Pass `-ReportPath C:\Reports` to keep output in a fixed location instead of wherever you launched from.
 
+**Exit codes.** The health check sets an exit code so a scheduled run can tell a
+clean environment from a failing one without parsing the report:
+
+| Code | Meaning |
+|------|---------|
+| `0` | run completed, no `FAIL` results |
+| `2` | run completed, one or more `FAIL` results |
+| `1` | the script itself errored and could not finish |
+
+`2` is deliberately distinct from `1` — "the health check found problems" and "the
+health check could not run" usually call for different responses. `WARN` and `INFO`
+do not affect the exit code, and the HTML/CSV reports are already written before the
+code is set.
+
+Getting that code back out is launcher-specific, and the two options trade off:
+`-File` propagates the exit code but passes arguments as plain strings (so it can't
+take a list — `-VCenter vc1,vc2` arrives as one server literally named `vc1,vc2`),
+while `-Command` parses arguments properly but collapses any non-zero script exit to
+`1` unless you propagate `$LASTEXITCODE` yourself:
+
+```powershell
+powershell.exe -Command "& { .\HealthCheck\Invoke-VMwareHealthCheck.ps1 -VCenter vc1,vc2; exit $LASTEXITCODE }"
+```
+
 The HTML report uses a **dashboard-style layout** — a dark navy header and left navigation sidebar, a blue accent color, and status pill badges (`PASS`/`WARN`/`FAIL`/`INFO`), similar in feel to a Dell iDRAC or OpenManage console. Color-coded **stat tiles** at the top (Fail / Warn / Info / Pass counts) are clickable and double as the severity filter, alongside the same **`Needs attention`, `FAIL`, `WARN`, `INFO`, `PASS`, `All`** filter buttons — the report opens pre-filtered to `FAIL` + `WARN` (what needs fixing), so you can drill straight to the problems instead of scrolling past everything that passed.
 
 Results are also broken into **per-check sections** (e.g. *VMware Tools*, *Hardware Version*, *Mounted ISOs*, *Snapshots*, *NTP*, *Datastore Free*), each in its own table. The left **sidebar** lists every section grouped by category with per-section counts and `FAIL`/`WARN` badges — click an entry to jump straight to that table. Severity filtering and section navigation work together: under a filter, sections with no matching rows are hidden automatically, and clicking a sidebar link reveals the target. (The CSV stays complete and unfiltered for trending; open it in Excel and use AutoFilter on the Status column for the same effect.)
