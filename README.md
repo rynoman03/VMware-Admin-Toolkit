@@ -52,6 +52,24 @@ The script checks:
 - **Capacity** — datastore free space, cluster CPU/RAM utilization
 - **Cluster config** — HA, admission control, DRS, EVC
 
+**Cluster config detail.** Each cluster-config row says what the setting actually
+does and what leaving it off costs you, rather than reporting a bare acronym:
+
+- **HA** (High Availability) — restarts VMs on the surviving hosts when a host fails.
+  `WARN` when disabled: the VMs a failed host was running stay down until someone
+  restarts them by hand.
+- **Admission control** — the reserve that makes HA's promise real. It holds back
+  enough spare capacity to actually restart the VMs from a failed host, and blocks
+  power-ons that would eat into that reserve. `WARN` when disabled, because HA is
+  then enabled but reserving nothing — VMs from a failed host may fail to restart
+  if the remaining hosts are already committed. This is an easy one to miss: HA
+  reads as `PASS` while the capacity to honor it isn't guaranteed.
+- **DRS** (Distributed Resource Scheduler) — balances VM load across hosts using
+  vMotion. `WARN` when disabled, and a separate `DRSAutomation` `WARN` when DRS is
+  on but not `FullyAutomated`, since it then only *recommends* migrations and
+  rebalancing waits on someone approving them.
+- **Host count** — `WARN` on a single-host cluster, where HA has nowhere to fail over.
+
 **EVC (Enhanced vMotion Compatibility).** `PASS` with the cluster's current EVC mode
 (e.g. `intel-broadwell`) if one is set, `WARN` if `Not configured`. EVC masks each
 host's CPU down to a common baseline instruction set so a running VM can vMotion
