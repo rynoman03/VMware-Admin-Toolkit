@@ -145,6 +145,53 @@ function Add-Result {
     Write-Host ("[{0,-4}] {1,-12} {2,-28} {3} - {4}" -f $Status, $Category, $Object, $Check, $Detail) -ForegroundColor $color
 }
 
+function Get-MaxHardwareVersion {
+    # Highest VM hardware version the VM's host/cluster can actually run, asked
+    # of the compute resource's EnvironmentBrowser rather than inferred from a
+    # hardcoded ESXi-version table (which goes stale every release). For a
+    # cluster this is already the common denominator across its hosts, so a
+    # recommendation based on it stays vMotion-safe.
+    # Returns $null if it can't be determined; cached per host name since the
+    # answer is identical for every VM on the same host.
+    param(
+        [object]    $VMHost,
+        [hashtable] $Cache
+    )
+    if (-not $VMHost) { return $null }
+    if ($Cache.ContainsKey($VMHost.Name)) { return $Cache[$VMHost.Name] }
+
+    $max = $null
+    try {
+        $computeResource = Get-View -Id $VMHost.ExtensionData.Parent -Property EnvironmentBrowser -ErrorAction Stop
+        $envBrowser      = Get-View -Id $computeResource.EnvironmentBrowser -ErrorAction Stop
+        foreach ($descriptor in @($envBrowser.QueryConfigOptionDescriptor())) {
+            if ($descriptor.Key -match 'vmx-(\d+)') {
+                $n = [int]$Matches[1]
+                if ($null -eq $max -or $n -gt $max) { $max = $n }
+            }
+        }
+    } catch {
+        $max = $null
+    }
+    $Cache[$VMHost.Name] = $max
+    return $max
+}
+
+function Format-LunList {
+    # LUN canonical names are long (naa.60014...), so show a handful and count
+    # the rest rather than printing dozens of them into one report cell.
+    param(
+        [object] $Names,
+        [int]    $MaxShown = 4
+    )
+    # Read .Count directly and enumerate through the pipeline: $Names is a
+    # List[object], and wrapping it as @($Names) throws "Argument types do not
+    # match" (same quirk noted on $script:Results below).
+    $shown = @($Names | Select-Object -First $MaxShown)
+    $extra = $Names.Count - $shown.Count
+    if ($extra -gt 0) { "$($shown -join ', ') +$extra more" } else { $shown -join ', ' }
+}
+
 # Ensure PowerCLI is present. Broadcom renamed the meta-module from
 # VMware.PowerCLI to VCF.PowerCLI in PowerCLI 13.x, so accept either.
 $pcliModule = @('VCF.PowerCLI','VMware.PowerCLI') |
@@ -315,26 +362,56 @@ try {
         # paths while one or more of its FC/iSCSI paths are dead, silently
         # running with reduced (or zero) redundancy. DatastoreConnectivity
         # above won't catch that; this walks the actual multipathing state.
+        # A dead HBA or fabric takes the same path off every LUN at once, so
+        # LUNs are grouped by how much redundancy each has LEFT (what you'd
+        # actually act on) rather than emitting one near-identical line per
+        # LUN, which turns into an unreadable wall of text on a host with
+        # dozens of LUNs.
         $luns = @($h | Get-ScsiLun -LunType disk -ErrorAction SilentlyContinue)
-        $pathIssues  = New-Object System.Collections.Generic.List[object]
         $totalPaths  = 0
-        $anyLunDown  = $false
+        $offlineLuns = New-Object System.Collections.Generic.List[object]
+        $degraded    = @{}   # "N of M paths active" -> list of LUN names
         foreach ($lun in $luns) {
-            $paths  = @(Get-ScsiLunPath -ScsiLun $lun -ErrorAction SilentlyContinue)
+            $paths = @(Get-ScsiLunPath -ScsiLun $lun -ErrorAction SilentlyContinue)
             $totalPaths += $paths.Count
-            $dead   = @($paths | Where-Object { $_.State -in @('Dead','Disabled') })
-            $active = @($paths | Where-Object { $_.State -notin @('Dead','Disabled') })
+            $dead = @($paths | Where-Object { $_.State -in @('Dead','Disabled') })
             if ($dead.Count -eq 0) { continue }
-            if ($active.Count -eq 0) {
-                $anyLunDown = $true
-                $pathIssues.Add("$($lun.CanonicalName): all $($paths.Count) paths down")
+
+            $activeCount = $paths.Count - $dead.Count
+            if ($activeCount -le 0) {
+                $offlineLuns.Add($lun.CanonicalName)
             } else {
-                $pathIssues.Add("$($lun.CanonicalName): $($dead.Count) of $($paths.Count) paths down")
+                $key = "$activeCount of $($paths.Count) paths active"
+                if (-not $degraded.ContainsKey($key)) {
+                    $degraded[$key] = New-Object System.Collections.Generic.List[object]
+                }
+                $degraded[$key].Add($lun.CanonicalName)
             }
         }
-        if ($pathIssues.Count -gt 0) {
-            $severity = if ($anyLunDown) { 'FAIL' } else { 'WARN' }
-            Add-Result 'HostHealth' $h.Name 'PathState' $severity ($pathIssues -join '; ')
+        $degradedCount = 0
+        foreach ($k in $degraded.Keys) { $degradedCount += $degraded[$k].Count }
+
+        if ($offlineLuns.Count -gt 0 -or $degradedCount -gt 0) {
+            # Headline counts first, then one grouped line per redundancy level,
+            # worst first. E.g.:
+            #   40 LUN(s): 2 offline, 12 degraded | OFFLINE - no active paths:
+            #   naa.aaa, naa.bbb | 3 of 4 paths active (12): naa.ccc, ... +8 more
+            $counts = New-Object System.Collections.Generic.List[object]
+            if ($offlineLuns.Count -gt 0) { $counts.Add("$($offlineLuns.Count) offline") }
+            if ($degradedCount -gt 0)     { $counts.Add("$degradedCount degraded") }
+
+            $parts = New-Object System.Collections.Generic.List[object]
+            $parts.Add("$($luns.Count) LUN(s): $($counts -join ', ')")
+            if ($offlineLuns.Count -gt 0) {
+                $parts.Add("OFFLINE - no active paths: $(Format-LunList $offlineLuns)")
+            }
+            # Sort by the leading active-path count in the key, fewest first.
+            foreach ($key in ($degraded.Keys | Sort-Object { [int]($_ -split ' ')[0] })) {
+                $parts.Add("$key ($($degraded[$key].Count)): $(Format-LunList $degraded[$key])")
+            }
+
+            $severity = if ($offlineLuns.Count -gt 0) { 'FAIL' } else { 'WARN' }
+            Add-Result 'HostHealth' $h.Name 'PathState' $severity ($parts -join ' | ')
         } elseif ($luns.Count -gt 0) {
             Add-Result 'HostHealth' $h.Name 'PathState' 'PASS' "$totalPaths path(s) across $($luns.Count) LUN(s), all active"
         } else {
@@ -411,6 +488,10 @@ try {
     $snapsByVm  = @{}
     $cdByVm     = @{}
     $floppyByVm = @{}
+    # Highest hardware version each host/cluster supports, filled in on first
+    # use by Get-MaxHardwareVersion so only hosts with an out-of-date VM on
+    # them cost an extra round-trip.
+    $maxHwCache = @{}
     if ($vms) {
         Write-Host "  Pre-fetching snapshots and media for $(@($vms).Count) VM(s)..." -ForegroundColor DarkGray
         foreach ($s in (Get-Snapshot -VM $vms)) {
@@ -495,14 +576,33 @@ try {
             }
         }
 
-        # VM hardware version (vmx-NN). Flag noticeably old ones.
+        # VM hardware version (vmx-NN). Flag noticeably old ones, and name a
+        # concrete target rather than a bare "consider upgrading" - the ceiling
+        # is whatever the host/cluster supports, and the guest OS has to be
+        # supported on that version too, which only the admin can confirm
+        # against VMware's compatibility guide.
         $hwVersion = $vm.HardwareVersion
         $hwNum = 0
         if ($hwVersion -match 'vmx-(\d+)') { $hwNum = [int]$Matches[1] }
         if ($hwNum -gt 0 -and $hwNum -lt $HardwareVersionWarnNum) {
-            Add-Result 'VMCompliance' $vm.Name 'HardwareVersion' 'WARN' "$hwVersion (consider upgrading)"
+            $maxHw = Get-MaxHardwareVersion -VMHost $vm.VMHost -Cache $maxHwCache
+            $guestOs = $vm.ExtensionData.Config.GuestFullName
+            $guestClause = if ($guestOs) {
+                "Confirm '$guestOs' is supported on the target version"
+            } else {
+                'Confirm the guest OS is supported on the target version'
+            }
+
+            $advice = if ($null -eq $maxHw) {
+                "Could not determine the highest version its host/cluster supports - check that before upgrading."
+            } elseif ($maxHw -le $hwNum) {
+                "Its host/cluster supports no higher than vmx-$maxHw, so it cannot be upgraded where it runs today - move it to a newer host first."
+            } else {
+                "Host/cluster supports up to vmx-$maxHw."
+            }
+            Add-Result 'VMCompliance' $vm.Name 'HardwareVersion' 'WARN' "$hwVersion is below the vmx-$HardwareVersionWarnNum baseline. $advice $guestClause before upgrading; it requires a power-off and cannot be rolled back."
         } else {
-            Add-Result 'VMCompliance' $vm.Name 'HardwareVersion' 'PASS' "$hwVersion"
+            Add-Result 'VMCompliance' $vm.Name 'HardwareVersion' 'PASS' "$hwVersion (at or above the vmx-$HardwareVersionWarnNum baseline)"
         }
 
         # Mounted ISO / connected CD-ROM (blocks vMotion, often left behind)
@@ -582,29 +682,29 @@ try {
     foreach ($cl in (Get-Cluster -Server $connections)) {
         # HA
         if ($cl.HAEnabled) {
-            Add-Result 'ClusterConfig' $cl.Name 'HA' 'PASS' 'HA enabled'
+            Add-Result 'ClusterConfig' $cl.Name 'HA' 'PASS' 'High Availability enabled (restarts VMs on the surviving hosts if a host fails)'
         } else {
-            Add-Result 'ClusterConfig' $cl.Name 'HA' 'WARN' 'HA disabled'
+            Add-Result 'ClusterConfig' $cl.Name 'HA' 'WARN' 'High Availability disabled - if a host fails, the VMs it was running will stay down until someone restarts them by hand'
         }
 
         # Admission control (only relevant when HA is on)
         if ($cl.HAEnabled) {
             $ac = $cl.ExtensionData.Configuration.DasConfig.AdmissionControlEnabled
             if ($ac) {
-                Add-Result 'ClusterConfig' $cl.Name 'AdmissionControl' 'PASS' 'Enabled'
+                Add-Result 'ClusterConfig' $cl.Name 'AdmissionControl' 'PASS' 'Enabled - HA holds back enough spare capacity to restart the VMs from a failed host, and blocks power-ons that would eat into that reserve'
             } else {
-                Add-Result 'ClusterConfig' $cl.Name 'AdmissionControl' 'WARN' 'Disabled (no failover capacity guarantee)'
+                Add-Result 'ClusterConfig' $cl.Name 'AdmissionControl' 'WARN' 'Disabled - HA reserves no spare capacity, so VMs from a failed host may fail to restart if the remaining hosts are already committed'
             }
         }
 
         # DRS
         if ($cl.DrsEnabled) {
-            Add-Result 'ClusterConfig' $cl.Name 'DRS' 'PASS' "Enabled ($($cl.DrsAutomationLevel))"
+            Add-Result 'ClusterConfig' $cl.Name 'DRS' 'PASS' "Distributed Resource Scheduler enabled, $($cl.DrsAutomationLevel) (balances VM load across hosts using vMotion)"
             if ($cl.DrsAutomationLevel -ne 'FullyAutomated') {
-                Add-Result 'ClusterConfig' $cl.Name 'DRSAutomation' 'WARN' "Not FullyAutomated ($($cl.DrsAutomationLevel))"
+                Add-Result 'ClusterConfig' $cl.Name 'DRSAutomation' 'WARN' "DRS is set to $($cl.DrsAutomationLevel), not FullyAutomated - it only recommends migrations instead of performing them, so rebalancing waits on someone approving them"
             }
         } else {
-            Add-Result 'ClusterConfig' $cl.Name 'DRS' 'WARN' 'DRS disabled'
+            Add-Result 'ClusterConfig' $cl.Name 'DRS' 'WARN' 'Distributed Resource Scheduler disabled - VM load is not balanced across hosts automatically'
         }
 
         # Host count / EVC sanity

@@ -83,6 +83,29 @@ icon in the vSphere Client. Runs regardless of power state, since this doesn't
 correlate with whether the VM is powered on. `WARN` on `disconnected` (the host may
 just be temporarily unreachable).
 
+**Storage path state.** A failed HBA or fabric takes the same path off *every* LUN at
+once, so rather than printing one near-identical line per LUN (unreadable on a host
+with dozens), LUNs are grouped by how much redundancy each has **left** — the thing
+you'd actually act on — with headline counts first and the LUN list capped:
+
+```
+40 LUN(s): 2 offline, 12 degraded | OFFLINE - no active paths: naa.…d1, naa.…d2 | 3 of 4 paths active (12): naa.…01, naa.…02, naa.…03, naa.…04 +8 more
+```
+
+`FAIL` if any LUN has no active paths left, `WARN` if some are merely degraded.
+
+**VM hardware version.** `WARN` below the `-HardwareVersionWarnNum` baseline (default
+13), and rather than a bare "consider upgrading" it names a concrete target: the
+highest version the VM's host/cluster can actually run, read from the compute
+resource's `EnvironmentBrowser` rather than inferred from a hardcoded ESXi-version
+table. For a cluster that value is already the common denominator across its hosts,
+so the recommendation stays vMotion-safe. If the host/cluster can't go any higher
+than the VM already is, it says so and suggests moving the VM to a newer host first.
+
+Because the guest OS also has to support the target version — and that's only
+answerable against VMware's compatibility guide — the detail names the guest OS to
+check and flags that the upgrade needs a power-off and can't be rolled back.
+
 **Disk consolidation needed.** `WARN` when a VM has leftover snapshot delta disks
 that need consolidating — often left behind by backup software that didn't clean up
 after itself, and easy to miss since it's a separate flag from the `Snapshot` check
