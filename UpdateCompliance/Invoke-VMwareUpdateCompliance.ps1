@@ -311,7 +311,13 @@ finally {
     $style = @"
 <style>
  :root {
-  --navy: #0b1f33; --navy-2: #123252; --accent: #045a9e;
+  /* Dell blue, matched to the iDRAC 10 banner. --brand is for large
+     surfaces only: at 4.14:1 on the page background it is too light for
+     body-size link text, so --accent stays darker for anything read as
+     text. --navy is the same hue family, deepened, so the sidebar and
+     table headers read as Dell blue rather than near-black. */
+  --brand: #0076ce; --brand-2: #0062ad;
+  --navy: #0a3a63; --navy-2: #10497a; --accent: #045a9e;
   --bg: #eef1f5; --surface: #ffffff; --border: #dbe1e8;
   --text: #1c2733; --muted: #64748b;
   --ok: #1e7c34; --ok-bg: #e6f4ea;
@@ -322,9 +328,9 @@ finally {
  * { box-sizing: border-box; }
  body { font-family: Segoe UI, Arial, sans-serif; margin: 0; background: var(--bg); color: var(--text); }
  a { color: var(--accent); }
- .topbar { background: linear-gradient(180deg, var(--navy) 0%, var(--navy-2) 100%); color: #fff; padding: 14px 24px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+ .topbar { background: linear-gradient(180deg, var(--brand) 0%, var(--brand-2) 100%); color: #fff; padding: 14px 24px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
  .topbar-brand { display: flex; align-items: center; gap: 12px; }
- .brand-badge { display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 34px; border-radius: 6px; background: var(--accent); color: #fff; font-weight: 700; font-size: 13px; letter-spacing: .5px; flex: none; }
+ .brand-badge { display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 34px; border-radius: 6px; background: rgba(255,255,255,.18); border: 1px solid rgba(255,255,255,.35); color: #fff; font-weight: 700; font-size: 13px; letter-spacing: .5px; flex: none; }
  .brand-title { font-size: 18px; font-weight: 600; }
  .topbar-meta { font-size: 12px; color: #c7d2df; }
  .layout { display: flex; align-items: flex-start; }
@@ -338,7 +344,7 @@ finally {
  .sidebar a:hover { background: var(--navy-2); border-left-color: var(--accent); }
  .sidebar .toc-name { min-width: 0; overflow-wrap: anywhere; }
  .sidebar .toc-meta { display: inline-flex; align-items: center; flex: none; }
- .sidebar .muted { color: #7c93ab; font-size: 11px; }
+ .sidebar .muted { color: #9fb4c9; font-size: 11px; }
  .content { flex: 1; min-width: 0; padding: 24px; }
  .meta-line { color: var(--muted); font-size: 13px; margin: 0 0 16px; }
  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px;
