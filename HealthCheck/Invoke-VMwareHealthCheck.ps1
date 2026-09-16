@@ -649,9 +649,9 @@ try {
         # same-generation clusters, in case a differing host is added later.
         $evc = $cl.ExtensionData.Summary.CurrentEVCModeKey
         if ($evc) {
-            Add-Result 'ClusterConfig' $cl.Name 'EVC' 'PASS' $evc
+            Add-Result 'ClusterConfig' $cl.Name 'EVC' 'PASS' "Enhanced vMotion Compatibility enabled, baseline '$evc' (masks host CPUs to a common instruction set so running VMs can vMotion between hosts with different CPU generations)"
         } else {
-            Add-Result 'ClusterConfig' $cl.Name 'EVC' 'WARN' 'Not configured - if hosts have mixed CPU generations, or a differing one is added later, vMotion may fail; consider enabling EVC as a hedge'
+            Add-Result 'ClusterConfig' $cl.Name 'EVC' 'WARN' 'Enhanced vMotion Compatibility (masks host CPUs to a common instruction set so running VMs can vMotion between hosts with different CPU generations) is not configured - if hosts have mixed CPU generations, or a differing one is added later, vMotion may fail; consider enabling EVC as a hedge'
         }
     }
     #endregion
