@@ -311,13 +311,14 @@ finally {
     $style = @"
 <style>
  :root {
-  /* Dell blue, matched to the iDRAC 10 banner. --brand is for large
-     surfaces only: at 4.14:1 on the page background it is too light for
-     body-size link text, so --accent stays darker for anything read as
-     text. --navy is the same hue family, deepened, so the sidebar and
-     table headers read as Dell blue rather than near-black. */
-  --brand: #0076ce; --brand-2: #0062ad;
-  --navy: #0a3a63; --navy-2: #10497a; --accent: #045a9e;
+  /* Every blue in the report is one of the two stops of the iDRAC 10
+     banner gradient, so nothing reads as a second, unrelated blue.
+     --brand (the top stop) is reserved for the banner itself: at 4.14:1 on
+     the page background it is too light for body-size text. --brand-2 (the
+     bottom stop) carries everything else - sidebar, table headers, links,
+     borders - and clears AA on light and dark alike. */
+  --brand: #0076ce; --brand-2: #0062ad; --brand-3: #00559a;
+  --accent: #0062ad;
   --bg: #eef1f5; --surface: #ffffff; --border: #dbe1e8;
   --text: #1c2733; --muted: #64748b;
   --ok: #1e7c34; --ok-bg: #e6f4ea;
@@ -334,17 +335,17 @@ finally {
  .brand-title { font-size: 18px; font-weight: 600; }
  .topbar-meta { font-size: 12px; color: #c7d2df; }
  .layout { display: flex; align-items: flex-start; }
- .sidebar { width: 270px; flex: 0 0 270px; background: var(--navy); color: #dbe6f0; padding: 18px 0; position: sticky; top: 0; align-self: flex-start; max-height: 100vh; overflow-y: auto; }
+ .sidebar { width: 270px; flex: 0 0 270px; background: var(--brand-2); color: #eaf3fb; padding: 18px 0; position: sticky; top: 0; align-self: flex-start; max-height: 100vh; overflow-y: auto; }
  .sidebar h3 { margin: 0 18px 10px; font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: #8fa3ba; }
  .sidebar .toc-cat { margin: 0 0 14px; }
  .sidebar .toc-cat-name { display: block; padding: 6px 18px; font-weight: 600; font-size: 12px; color: #a9bdd2; text-transform: uppercase; letter-spacing: .04em; }
  .sidebar ul { list-style: none; margin: 4px 0 0; padding: 0; }
  .sidebar li { margin: 0; }
- .sidebar a { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 6px 18px; font-size: 13px; color: #dbe6f0; text-decoration: none; border-left: 3px solid transparent; cursor: pointer; }
- .sidebar a:hover { background: var(--navy-2); border-left-color: var(--accent); }
+ .sidebar a { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 6px 18px; font-size: 13px; color: #eaf3fb; text-decoration: none; border-left: 3px solid transparent; cursor: pointer; }
+ .sidebar a:hover { background: var(--brand-3); border-left-color: #9fd4f7; }
  .sidebar .toc-name { min-width: 0; overflow-wrap: anywhere; }
  .sidebar .toc-meta { display: inline-flex; align-items: center; flex: none; }
- .sidebar .muted { color: #9fb4c9; font-size: 11px; }
+ .sidebar .muted { color: #cfe0ee; font-size: 11px; }
  .content { flex: 1; min-width: 0; padding: 24px; }
  .meta-line { color: var(--muted); font-size: 13px; margin: 0 0 16px; }
  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px;
@@ -372,10 +373,10 @@ finally {
  .filters button { font: inherit; font-size: 13px; padding: 7px 14px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); color: var(--text); cursor: pointer; }
  .filters button:hover { border-color: var(--accent); color: var(--accent); }
  .filters button.active { background: var(--accent); color: #fff; border-color: var(--accent); }
- h2 { color: var(--navy); margin: 28px 0 4px; padding-left: 10px; border-left: 4px solid var(--accent); font-size: 16px; scroll-margin-top: 118px; }
+ h2 { color: var(--brand-2); margin: 28px 0 4px; padding-left: 10px; border-left: 4px solid var(--accent); font-size: 16px; scroll-margin-top: 118px; }
  table { border-collapse: collapse; width: 100%; margin-top: 6px; background: var(--surface); border-radius: 6px; overflow: hidden; box-shadow: 0 1px 2px rgba(16,24,40,.05); }
  th, td { border-bottom: 1px solid var(--border); padding: 8px 12px; text-align: left; font-size: 13px; }
- th { background: var(--navy); color: #fff; font-weight: 600; }
+ th { background: var(--brand-2); color: #fff; font-weight: 600; }
  tr:hover td { background: #f5f8fb; }
  .badge { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 11px; font-weight: 700; letter-spacing: .03em; }
  .badge-PASS { background: var(--ok-bg); color: var(--ok); }
