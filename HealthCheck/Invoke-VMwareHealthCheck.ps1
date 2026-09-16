@@ -58,6 +58,27 @@
     newer than vCenter is always FAIL regardless of this value, since that's
     unsupported outright. Default 2.
 
+.PARAMETER ExpectedSyslogServer
+    Optional baseline of the remote syslog target(s) every host is supposed to
+    be pointing at, e.g. -ExpectedSyslogServer 'udp://loghost01.corp.local:514'.
+    When supplied, the Syslog check compares each host's configured targets
+    against this list in BOTH directions and WARNs on any divergence: an
+    expected collector that is missing, or a configured collector that is not
+    in the baseline (the stale/decommissioned-collector case). Omit it and the
+    check behaves as before - it only verifies that some remote target is set.
+
+    Matching ignores a 'udp://' / 'tcp://' / 'ssl://' scheme prefix and is
+    case-insensitive, so 'udp://loghost:514', 'loghost:514' and 'LOGHOST:514'
+    all compare equal. Leave the ':port' off an expected entry to accept any
+    port on that host.
+
+.PARAMETER ExpectedNtpServer
+    Optional baseline of the NTP server(s) every host is supposed to be using,
+    e.g. -ExpectedNtpServer 10.10.0.10,10.10.0.11. Compared exactly like
+    -ExpectedSyslogServer (both directions, WARN on divergence) on top of the
+    existing "servers configured and ntpd running" checks. Omit it and the
+    check behaves as before.
+
 .PARAMETER TrustAllCertificates
     Whether to ignore untrusted/self-signed vCenter TLS certificates when
     connecting (PowerCLI's InvalidCertificateAction). Default $true, since
@@ -70,6 +91,12 @@
 .EXAMPLE
     $cred = Get-Credential
     .\Invoke-VMwareHealthCheck.ps1 -VCenter vc1,vc2 -Credential $cred -ReportPath C:\Reports
+
+.EXAMPLE
+    # Flag any host whose syslog/NTP settings have drifted from the standard build
+    .\Invoke-VMwareHealthCheck.ps1 -VCenter vcenter01.corp.local `
+        -ExpectedSyslogServer 'udp://loghost01.corp.local:514' `
+        -ExpectedNtpServer 10.10.0.10,10.10.0.11
 
 .NOTES
     Requires PowerCLI. Install with:  Install-Module VCF.PowerCLI -Scope CurrentUser
@@ -113,6 +140,13 @@ param(
     [int] $CertExpiryWarnDays       = 30,
     [int] $CertExpiryCritDays       = 7,
     [int] $HostVersionSkewFailMajors = 2,
+
+    # Optional baselines. Absent = the Syslog/NTP checks behave as they always
+    # have (is anything configured at all?); supplied = each host's configured
+    # targets are also compared against the list, in both directions.
+    [string[]] $ExpectedSyslogServer,
+    [string[]] $ExpectedNtpServer,
+
     [switch] $TrustAllCertificates  = $true
 )
 
@@ -143,6 +177,81 @@ function Add-Result {
         default { 'Gray' }
     }
     Write-Host ("[{0,-4}] {1,-12} {2,-28} {3} - {4}" -f $Status, $Category, $Object, $Check, $Detail) -ForegroundColor $color
+}
+
+# Normalizes one syslog/NTP target into a comparable host + port pair.
+# ESXi stores syslog targets in several equivalent spellings - 'udp://host:514',
+# 'host:514', a bare 'host' - and NTP servers as a bare host or IP. Comparing the
+# raw strings would report drift that isn't there, so both sides of the baseline
+# comparison go through here first.
+function ConvertTo-LogTargetKey {
+    param([string] $Target)
+
+    $t = "$Target".Trim()
+    if (-not $t) { return $null }
+
+    $t = $t -replace '^[a-zA-Z][a-zA-Z0-9+.-]*://', ''   # drop udp:// tcp:// ssl://
+    $t = $t -replace '/.*$', ''                          # drop any trailing path
+
+    $hostPart = $t
+    $portPart = $null
+    if ($t -match '^\[(?<h>.+)\](?::(?<p>\d+))?$') {      # [IPv6] or [IPv6]:port
+        $hostPart = $Matches['h']
+        if ($Matches['p']) { $portPart = $Matches['p'] }
+    } elseif ($t -match '^(?<h>[^:]+):(?<p>\d+)$') {      # host:port
+        $hostPart = $Matches['h']
+        $portPart = $Matches['p']
+    }
+    # Anything else (a bare hostname, or an unbracketed IPv6 literal) is all host.
+
+    [pscustomobject]@{
+        Host     = $hostPart.TrimEnd('.').ToLowerInvariant()
+        Port     = $portPart
+        Original = $Target
+    }
+}
+
+# Compares a host's configured targets against an expected baseline in BOTH
+# directions: what the baseline says should be there but isn't (Missing), and
+# what is configured but isn't in the baseline (Unexpected - the stale or
+# decommissioned collector a rebuilt/older host is still pointing at).
+# An expected entry with no port matches that host on any port.
+function Compare-TargetBaseline {
+    param(
+        [object[]] $Actual,
+        [string[]] $Expected
+    )
+
+    $actualKeys   = @(@($Actual)   | ForEach-Object { ConvertTo-LogTargetKey $_ } | Where-Object { $_ })
+    $expectedKeys = @(@($Expected) | ForEach-Object { ConvertTo-LogTargetKey $_ } | Where-Object { $_ })
+
+    # Explicit nested loops rather than Where-Object inside Where-Object, which
+    # would shadow $_ and silently compare the wrong side.
+    $missing    = New-Object System.Collections.Generic.List[object]
+    $unexpected = New-Object System.Collections.Generic.List[object]
+
+    foreach ($exp in $expectedKeys) {
+        $found = $false
+        foreach ($act in $actualKeys) {
+            if ($act.Host -eq $exp.Host -and ($null -eq $exp.Port -or $act.Port -eq $exp.Port)) {
+                $found = $true
+                break
+            }
+        }
+        if (-not $found) { $missing.Add($exp.Original) }
+    }
+    foreach ($act in $actualKeys) {
+        $found = $false
+        foreach ($exp in $expectedKeys) {
+            if ($act.Host -eq $exp.Host -and ($null -eq $exp.Port -or $act.Port -eq $exp.Port)) {
+                $found = $true
+                break
+            }
+        }
+        if (-not $found) { $unexpected.Add($act.Original) }
+    }
+
+    [pscustomobject]@{ Missing = $missing; Unexpected = $unexpected }
 }
 
 # Ensure PowerCLI is present. Broadcom renamed the meta-module from
@@ -280,23 +389,77 @@ try {
             }
         }
 
-        # NTP - configured and the daemon running
-        $ntpServers = ($h | Get-VMHostNtpServer)
+        # NTP - servers configured, daemon running, and (optionally) the
+        # configured servers matching the -ExpectedNtpServer baseline.
+        $ntpServers = @($h | Get-VMHostNtpServer)
         $ntpSvc     = $h | Get-VMHostService | Where-Object { $_.Key -eq 'ntpd' }
-        if (-not $ntpServers) {
-            Add-Result 'HostHealth' $h.Name 'NTP' 'FAIL' 'No NTP servers configured'
-        } elseif (-not $ntpSvc.Running) {
-            Add-Result 'HostHealth' $h.Name 'NTP' 'WARN' "Configured ($($ntpServers -join ',')) but ntpd not running"
+        if ($ntpServers.Count -eq 0) {
+            $detail = 'No NTP servers configured'
+            if ($ExpectedNtpServer) { $detail += " - expected: $($ExpectedNtpServer -join ', ')" }
+            Add-Result 'HostHealth' $h.Name 'NTP' 'FAIL' $detail
         } else {
-            Add-Result 'HostHealth' $h.Name 'NTP' 'PASS' "Running; servers: $($ntpServers -join ',')"
+            $ntpIssues = New-Object System.Collections.Generic.List[object]
+            if ($null -eq $ntpSvc) {
+                $ntpIssues.Add('ntpd service not present on this host - time will drift')
+            } elseif (-not $ntpSvc.Running) {
+                $ntpIssues.Add('ntpd service not running - the configured servers are not being used')
+            }
+            if ($ExpectedNtpServer) {
+                $ntpCmp = Compare-TargetBaseline -Actual $ntpServers -Expected $ExpectedNtpServer
+                if ($ntpCmp.Missing.Count -gt 0) {
+                    $ntpIssues.Add("missing expected server(s): $($ntpCmp.Missing -join ', ')")
+                }
+                if ($ntpCmp.Unexpected.Count -gt 0) {
+                    $ntpIssues.Add("server(s) not in the baseline: $($ntpCmp.Unexpected -join ', ') - possibly an older build still pointing at a retired time source")
+                }
+            }
+
+            if ($ntpIssues.Count -gt 0) {
+                $detail = "Configured: $($ntpServers -join ', ') | $($ntpIssues -join ' | ')"
+                if ($ExpectedNtpServer) { $detail += " | Expected: $($ExpectedNtpServer -join ', ')" }
+                Add-Result 'HostHealth' $h.Name 'NTP' 'WARN' $detail
+            } elseif ($ExpectedNtpServer) {
+                Add-Result 'HostHealth' $h.Name 'NTP' 'PASS' "Running; servers: $($ntpServers -join ', ') (matches expected baseline)"
+            } else {
+                Add-Result 'HostHealth' $h.Name 'NTP' 'PASS' "Running; servers: $($ntpServers -join ', ')"
+            }
         }
 
-        # Syslog - remote target configured
-        $syslog = ($h | Get-VMHostSysLogServer)
-        if (-not $syslog) {
-            Add-Result 'HostHealth' $h.Name 'Syslog' 'WARN' 'No remote syslog target configured'
+        # Syslog - remote target configured, and (optionally) matching the
+        # -ExpectedSyslogServer baseline.
+        $syslog       = @($h | Get-VMHostSysLogServer)
+        $syslogActual = @($syslog | ForEach-Object {
+            # Bracket a bare IPv6 literal before appending the port, or
+            # 'fd00::10' + ':514' reads back as one unparseable host.
+            $sysHost = "$($_.Host)"
+            if ($sysHost -like '*:*' -and $sysHost -notlike '`[*') { $sysHost = "[$sysHost]" }
+            if ($_.Port) { "${sysHost}:$($_.Port)" } else { $sysHost }
+        })
+        if ($syslogActual.Count -eq 0) {
+            if ($ExpectedSyslogServer) {
+                # A baseline was supplied, so a remote collector is required here -
+                # nothing configured means the requirement is entirely unmet.
+                Add-Result 'HostHealth' $h.Name 'Syslog' 'FAIL' "No remote syslog target configured - expected: $($ExpectedSyslogServer -join ', ')"
+            } else {
+                Add-Result 'HostHealth' $h.Name 'Syslog' 'WARN' 'No remote syslog target configured'
+            }
+        } elseif (-not $ExpectedSyslogServer) {
+            Add-Result 'HostHealth' $h.Name 'Syslog' 'PASS' "Target: $($syslogActual -join ', ')"
         } else {
-            Add-Result 'HostHealth' $h.Name 'Syslog' 'PASS' "Target: $(($syslog | ForEach-Object { "$($_.Host):$($_.Port)" }) -join ',')"
+            $sysCmp    = Compare-TargetBaseline -Actual $syslogActual -Expected $ExpectedSyslogServer
+            $sysIssues = New-Object System.Collections.Generic.List[object]
+            if ($sysCmp.Missing.Count -gt 0) {
+                $sysIssues.Add("missing expected target(s): $($sysCmp.Missing -join ', ')")
+            }
+            if ($sysCmp.Unexpected.Count -gt 0) {
+                $sysIssues.Add("target(s) not in the baseline: $($sysCmp.Unexpected -join ', ') - possibly an older build still shipping logs to a retired collector")
+            }
+
+            if ($sysIssues.Count -gt 0) {
+                Add-Result 'HostHealth' $h.Name 'Syslog' 'WARN' "Configured: $($syslogActual -join ', ') | $($sysIssues -join ' | ') | Expected: $($ExpectedSyslogServer -join ', ')"
+            } else {
+                Add-Result 'HostHealth' $h.Name 'Syslog' 'PASS' "Target: $($syslogActual -join ', ') (matches expected baseline)"
+            }
         }
 
         # Uptime (informational; very long uptime can mean missed patching)
