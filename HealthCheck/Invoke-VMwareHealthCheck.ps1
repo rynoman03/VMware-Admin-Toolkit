@@ -144,6 +144,57 @@
     are written in a finally block so they are produced even if the run
     errors partway through. Pass -ReportPath to control where they land.
 
+    Setting the syslog / NTP baselines (-ExpectedSyslogServer,
+    -ExpectedNtpServer). Both are optional: leave them off and those two
+    checks only ask "is anything configured at all?", exactly as before.
+    Supply them and each host is also compared against the baseline, so a
+    host still pointing at a retired collector or time source is flagged.
+
+    Step 1 - find out what your hosts actually have, rather than guessing.
+    Sorting by the value groups them, so the odd ones out are obvious:
+
+      Connect-VIServer vcenter01.corp.local
+      Get-VMHost | ForEach-Object {
+          [pscustomobject]@{
+              Host   = $_.Name
+              Syslog = ($_ | Get-VMHostSysLogServer |
+                          ForEach-Object { "$($_.Host):$($_.Port)" }) -join ', '
+              NTP    = ($_ | Get-VMHostNtpServer) -join ', '
+          }
+      } | Sort-Object Syslog | Format-Table -AutoSize
+
+    Whatever your build standard uses becomes the baseline. Everything that
+    disagrees with it is what these parameters are meant to surface.
+
+    Step 2 - pass it on the command line:
+
+      .\Invoke-VMwareHealthCheck.ps1 -VCenter vcenter01.corp.local `
+          -ExpectedSyslogServer 'udp://loghost01.corp.local:514' `
+          -ExpectedNtpServer 10.10.0.10,10.10.0.11
+
+    Quote a syslog value (it contains '://'); NTP servers need no quotes.
+    Pass several by comma-separating them.
+
+    Step 3 (optional) - if you always check the same environment, give the
+    parameters a default in the param() block below instead of typing them
+    every run:
+
+      [string[]] $ExpectedSyslogServer = 'udp://loghost01.corp.local:514',
+      [string[]] $ExpectedNtpServer    = @('10.10.0.10','10.10.0.11'),
+
+    Two consequences worth knowing before you do: the checks stop being
+    opt-in, so a run against a DIFFERENT vCenter with its own collector
+    will WARN on every host; and to switch the comparison off for a single
+    run you then have to pass an empty array, -ExpectedSyslogServer @().
+    If you point this at more than one environment, leaving the defaults
+    empty and passing the value per run stays cleaner.
+
+    Matching is deliberately forgiving so equivalent spellings don't read as
+    drift: a udp:// / tcp:// / ssl:// prefix is ignored, comparison is
+    case-insensitive, a trailing dot on an FQDN is ignored, IPv6 literals
+    compare bracketed or not, and order does not matter. Leave the ':port'
+    off an expected syslog entry to accept that host on any port.
+
     Exit codes, so a scheduler or monitoring wrapper can act on the outcome
     without parsing the report:
       0  run completed, no FAIL results
@@ -193,6 +244,10 @@ param(
     # Optional baselines. Absent = the Syslog/NTP checks behave as they always
     # have (is anything configured at all?); supplied = each host's configured
     # targets are also compared against the list, in both directions.
+    # To always compare against the same baseline, give these a default here,
+    # e.g.  [string[]] $ExpectedSyslogServer = 'udp://loghost01.corp.local:514',
+    # See "Setting the syslog / NTP baselines" in .NOTES above for how to find
+    # the right value, and for what setting a default changes.
     [string[]] $ExpectedSyslogServer,
     [string[]] $ExpectedNtpServer,
 
