@@ -52,6 +52,24 @@ The script checks:
 - **Capacity** — datastore free space, cluster CPU/RAM utilization
 - **Cluster config** — HA, admission control, DRS, EVC
 
+**Cluster config detail.** Each cluster-config row says what the setting actually
+does and what leaving it off costs you, rather than reporting a bare acronym:
+
+- **HA** (High Availability) — restarts VMs on the surviving hosts when a host fails.
+  `WARN` when disabled: the VMs a failed host was running stay down until someone
+  restarts them by hand.
+- **Admission control** — the reserve that makes HA's promise real. It holds back
+  enough spare capacity to actually restart the VMs from a failed host, and blocks
+  power-ons that would eat into that reserve. `WARN` when disabled, because HA is
+  then enabled but reserving nothing — VMs from a failed host may fail to restart
+  if the remaining hosts are already committed. This is an easy one to miss: HA
+  reads as `PASS` while the capacity to honor it isn't guaranteed.
+- **DRS** (Distributed Resource Scheduler) — balances VM load across hosts using
+  vMotion. `WARN` when disabled, and a separate `DRSAutomation` `WARN` when DRS is
+  on but not `FullyAutomated`, since it then only *recommends* migrations and
+  rebalancing waits on someone approving them.
+- **Host count** — `WARN` on a single-host cluster, where HA has nowhere to fail over.
+
 **EVC (Enhanced vMotion Compatibility).** `PASS` with the cluster's current EVC mode
 (e.g. `intel-broadwell`) if one is set, `WARN` if `Not configured`. EVC masks each
 host's CPU down to a common baseline instruction set so a running VM can vMotion
@@ -82,6 +100,29 @@ service is running (often enabled temporarily for troubleshooting and then forgo
 icon in the vSphere Client. Runs regardless of power state, since this doesn't
 correlate with whether the VM is powered on. `WARN` on `disconnected` (the host may
 just be temporarily unreachable).
+
+**Storage path state.** A failed HBA or fabric takes the same path off *every* LUN at
+once, so rather than printing one near-identical line per LUN (unreadable on a host
+with dozens), LUNs are grouped by how much redundancy each has **left** — the thing
+you'd actually act on — with headline counts first and the LUN list capped:
+
+```
+40 LUN(s): 2 offline, 12 degraded | OFFLINE - no active paths: naa.…d1, naa.…d2 | 3 of 4 paths active (12): naa.…01, naa.…02, naa.…03, naa.…04 +8 more
+```
+
+`FAIL` if any LUN has no active paths left, `WARN` if some are merely degraded.
+
+**VM hardware version.** `WARN` below the `-HardwareVersionWarnNum` baseline (default
+13), and rather than a bare "consider upgrading" it names a concrete target: the
+highest version the VM's host/cluster can actually run, read from the compute
+resource's `EnvironmentBrowser` rather than inferred from a hardcoded ESXi-version
+table. For a cluster that value is already the common denominator across its hosts,
+so the recommendation stays vMotion-safe. If the host/cluster can't go any higher
+than the VM already is, it says so and suggests moving the VM to a newer host first.
+
+Because the guest OS also has to support the target version — and that's only
+answerable against VMware's compatibility guide — the detail names the guest OS to
+check and flags that the upgrade needs a power-off and can't be rolled back.
 
 **Disk consolidation needed.** `WARN` when a VM has leftover snapshot delta disks
 that need consolidating — often left behind by backup software that didn't clean up
