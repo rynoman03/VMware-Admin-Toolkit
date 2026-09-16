@@ -36,6 +36,11 @@ $cred = Get-Credential
 
 # Require a valid (non-self-signed) TLS cert chain when connecting
 .\HealthCheck\Invoke-VMwareHealthCheck.ps1 -VCenter vcenter01.corp.local -TrustAllCertificates:$false
+
+# Flag any host whose syslog/NTP settings have drifted from the standard build
+.\HealthCheck\Invoke-VMwareHealthCheck.ps1 -VCenter vcenter01.corp.local `
+    -ExpectedSyslogServer 'udp://loghost01.corp.local:514' `
+    -ExpectedNtpServer 10.10.0.10,10.10.0.11
 ```
 
 By default, untrusted/self-signed vCenter certificates are accepted so the script
@@ -47,10 +52,41 @@ report showing those failures.
 
 The script checks:
 
-- **Host health** — connection state, NTP, syslog, uptime, datastore connectivity, FC/iSCSI storage path state (dead paths, even when a datastore still reads as accessible on its remaining paths), TLS certificate expiry (ESXi hosts and vCenter itself), local account password expiration policy (root included), ESXi build vs. vCenter build, lockdown mode, SSH service state
+- **Host health** — connection state, NTP, syslog (both optionally compared against an expected baseline), uptime, datastore connectivity, FC/iSCSI storage path state (dead paths, even when a datastore still reads as accessible on its remaining paths), TLS certificate expiry (ESXi hosts and vCenter itself), local account password expiration policy (root included), ESXi build vs. vCenter build, lockdown mode, SSH service state
 - **VM compliance** — connection state (orphaned/inaccessible VMs), disk consolidation needed, VMware Tools, OS system drive free space (`C:\` / `/`), all other guest drives, VM hardware version, mounted ISOs/CD-ROMs, connected floppy drives, snapshot age
 - **Capacity** — datastore free space, cluster CPU/RAM utilization
 - **Cluster config** — HA, admission control, DRS, EVC
+
+**Syslog & NTP baselines (`-ExpectedSyslogServer` / `-ExpectedNtpServer`).** By
+default these two checks only answer "is *anything* configured?" — which passes a
+host that's still shipping logs to a collector you decommissioned two years ago,
+or syncing time from a retired NTP appliance. Pass the value your standard build
+is supposed to have and each host's actual settings are compared against it in
+**both directions**:
+
+- **Missing** — an expected target isn't configured on the host.
+- **Not in the baseline** — the host is configured with something your baseline
+  doesn't list. This is the one that finds hosts built from an older image or
+  hand-configured during an outage and never brought back in line.
+
+Either one is a `WARN`, and the detail shows what the host actually has *and*
+what was expected, side by side, so the fix is obvious from the report alone.
+An exact match is a `PASS` reading `(matches expected baseline)`. With a baseline
+supplied, a host with **nothing** configured is a `FAIL` rather than a `WARN` —
+you've declared a collector is required, and the requirement is entirely unmet.
+
+Matching is forgiving about spelling, so you don't get false failures from
+equivalent notations: a `udp://` / `tcp://` / `ssl://` scheme prefix is ignored,
+comparison is case-insensitive, a trailing dot on an FQDN is ignored, IPv6
+literals compare correctly bracketed or not, and order doesn't matter. Leave the
+`:port` off an expected entry (`-ExpectedSyslogServer loghost01.corp.local`) to
+accept that host on any port. Omit the parameters entirely and both checks behave
+exactly as they did before.
+
+The NTP check keeps its existing behavior on top of this — `FAIL` when no servers
+are configured at all, `WARN` when servers are set but the `ntpd` daemon isn't
+running (a baseline mismatch and a stopped daemon are reported together in one
+row, not one at a time).
 
 **Cluster config detail.** Each cluster-config row says what the setting actually
 does and what leaving it off costs you, rather than reporting a bare acronym:
