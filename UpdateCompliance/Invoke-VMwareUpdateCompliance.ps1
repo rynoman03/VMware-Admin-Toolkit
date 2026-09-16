@@ -336,6 +336,8 @@ finally {
  .sidebar li { margin: 0; }
  .sidebar a { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 6px 18px; font-size: 13px; color: #dbe6f0; text-decoration: none; border-left: 3px solid transparent; cursor: pointer; }
  .sidebar a:hover { background: var(--navy-2); border-left-color: var(--accent); }
+ .sidebar .toc-name { min-width: 0; overflow-wrap: anywhere; }
+ .sidebar .toc-meta { display: inline-flex; align-items: center; flex: none; }
  .sidebar .muted { color: #7c93ab; font-size: 11px; }
  .content { flex: 1; min-width: 0; padding: 24px; }
  .meta-line { color: var(--muted); font-size: 13px; margin: 0 0 16px; }
@@ -418,7 +420,7 @@ finally {
             $badges = ''
             if ($f -gt 0) { $badges += "<span class='b bFAIL'>$f FAIL</span>" }
             if ($w -gt 0) { $badges += "<span class='b bWARN'>$w WARN</span>" }
-            "<li><a data-jump='$($sec.Id)' href='#$($sec.Id)'>$($sec.Check)</a> <span class='muted'>($($sec.Rows.Count))</span>$badges</li>"
+            "<li><a data-jump='$($sec.Id)' href='#$($sec.Id)'><span class='toc-name'>$($sec.Check)</span><span class='toc-meta'><span class='muted'>($($sec.Rows.Count))</span>$badges</span></a></li>"
         }
         "<div class='toc-cat'><span class='toc-cat-name'>$($catGrp.Name)</span><ul>$($items -join '')</ul></div>"
     }
