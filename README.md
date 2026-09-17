@@ -177,11 +177,16 @@ lockdown mode is `Disabled` (direct root/local logins bypass vCenter, reducing
 auditability — Normal or Strict is recommended), and `WARN` when the SSH (`TSM-SSH`)
 service is running (often enabled temporarily for troubleshooting and then forgotten).
 
-**VM connection state.** `FAIL` when a VM shows as `orphaned`, `inaccessible`, or
-`invalid` — vCenter's inventory losing track of the VM, shown as the "question mark"
-icon in the vSphere Client. Runs regardless of power state, since this doesn't
-correlate with whether the VM is powered on. `WARN` on `disconnected` (the host may
-just be temporarily unreachable).
+**VM connection state.** `FAIL` only on the three genuinely broken states, each of
+which says which one it is and what it means: `orphaned` (vCenter has an inventory
+entry but the host doesn't report the VM — the "question mark" icon in the vSphere
+Client), `inaccessible` (the `.vmx` can't be read, usually a storage problem), and
+`invalid` (vCenter considers the VM unusable). `WARN` on `disconnected` (the host
+running it is currently unreachable). `PASS` on `connected`. Runs regardless of power
+state, since this doesn't correlate with whether the VM is powered on.
+
+If vCenter doesn't return the property at all, that's reported as `INFO` ("not
+reported by vCenter"), never as a `FAIL` — an unreadable state is not a broken VM.
 
 **Storage path state.** A failed HBA or fabric takes the same path off *every* LUN at
 once, so rather than printing one near-identical line per LUN (unreadable on a host
@@ -210,7 +215,8 @@ check and flags that the upgrade needs a power-off and can't be rolled back.
 that need consolidating — often left behind by backup software that didn't clean up
 after itself, and easy to miss since it's a separate flag from the `Snapshot` check
 above (a VM can need consolidation with no visible snapshot in the UI). Left alone,
-these silently consume growing datastore space.
+these silently consume growing datastore space. As with connection state, a property
+vCenter doesn't return is reported as `INFO` rather than counted as a clean `PASS`.
 
 Findings are tagged `PASS` / `WARN` / `FAIL` / `INFO`. The script never modifies configuration.
 
