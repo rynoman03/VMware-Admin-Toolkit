@@ -1240,19 +1240,21 @@ try {
 
         # EVC masks host CPUs to a common baseline so a running VM can vMotion
         # between different CPU generations without the guest seeing the CPU
-        # change mid-flight. We can't tell from vCenter alone whether this
-        # cluster's hosts actually span multiple CPU generations, so flag
-        # "not configured" as WARN rather than staying silent - it's generally
-        # recommended as a hedge even for same-generation clusters.
+        # change mid-flight.
+        # Reported as INFO, not WARN, even when it is off: plenty of estates
+        # run no EVC by design, and vCenter can't tell us whether this
+        # cluster's hosts actually span CPU generations - so "not configured"
+        # is context, not a fault. Flagging it put an item on every cluster in
+        # the "needs attention" view that nobody was ever going to action.
         # Summary is requested with the view above, so a $null here means
-        # vCenter genuinely didn't answer - which is not the same as "off",
-        # and must not be reported as one.
+        # vCenter genuinely didn't answer - a different statement from "off",
+        # and the detail keeps them apart even though both are INFO.
         if ($null -eq $cv.Summary) {
             Add-Result 'ClusterConfig' $clName 'EVC' 'INFO' 'EVC mode not reported by vCenter for this cluster - could not determine whether it is enabled'
         } elseif ($cv.Summary.CurrentEVCModeKey) {
             Add-Result 'ClusterConfig' $clName 'EVC' 'PASS' "Enhanced vMotion Compatibility enabled, baseline '$($cv.Summary.CurrentEVCModeKey)' (masks host CPUs to a common instruction set so running VMs can vMotion between hosts with different CPU generations)"
         } else {
-            Add-Result 'ClusterConfig' $clName 'EVC' 'WARN' 'Enhanced vMotion Compatibility (masks host CPUs to a common instruction set so running VMs can vMotion between hosts with different CPU generations) is not configured - if hosts have mixed CPU generations, or a differing one is added later, vMotion may fail; consider enabling EVC as a hedge'
+            Add-Result 'ClusterConfig' $clName 'EVC' 'INFO' 'Enhanced vMotion Compatibility (masks host CPUs to a common instruction set so running VMs can vMotion between hosts with different CPU generations) is not configured - fine if every host is the same CPU generation; worth enabling as a hedge before adding a differing host'
         }
     }
     #endregion
