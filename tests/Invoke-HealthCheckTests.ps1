@@ -236,6 +236,37 @@ try {
         (@($r.Calls | Where-Object { $_ -match 'ScsiLun|VMHostService|AdvancedSetting|CDDrive|FloppyDrive' }).Count -eq 0) `
         "got: $($r.Calls -join ', ')"
 
+    # Snapshot SIZE needs PowerCLI objects, but only for the VMs that actually
+    # have a snapshot - which the VM views already state. Asking Get-VM for the
+    # whole inventory to size a handful of snapshots was a full extra
+    # retrieval of every VM on every run.
+    Assert-That 'snapshot sizing never retrieves the whole VM inventory' `
+        (@($r.Calls | Where-Object { $_ -like 'Get-VM:all*' }).Count -eq 0) `
+        "got: $($r.Calls -join ', ')"
+    $scoped = @($r.Calls | Where-Object { $_ -like 'Get-VM:scoped:*' })
+    Assert-That 'snapshot sizing asks only about the VMs holding snapshots' `
+        ($scoped.Count -eq 1 -and $scoped[0] -like 'Get-VM:scoped:1:*') `
+        "got: $($r.Calls -join ', ')"
+    # A MoRef is unique only within one vCenter, so the lookup must name the
+    # server it belongs to or it can match another vCenter's VM of the same id.
+    Assert-That 'snapshot sizing is bound to the VM own vCenter' `
+        ($scoped.Count -eq 1 -and $scoped[0] -like '*:server') `
+        "got: $($r.Calls -join ', ')"
+
+    # The snapshot tree is walked recursively, so a snapshot nested under
+    # another is reported rather than only the root.
+    $snapRows = @($r.Rows | Where-Object { $_.Object -eq 'snapvm01' -and $_.Check -eq 'Snapshot' })
+    Assert-That 'nested snapshots are reported, not just the root' `
+        ($snapRows.Count -eq 2) "got $($snapRows.Count) row(s): $($snapRows.Detail -join ' | ')"
+    $oldSnap = @($snapRows | Where-Object { $_.Detail -match 'before-patching' })
+    Assert-That 'a snapshot past the age threshold is WARN and carries its size' `
+        ($oldSnap.Count -eq 1 -and $oldSnap[0].Status -eq 'WARN' -and $oldSnap[0].Detail -match '45d, 12\.5GB') `
+        "got: $($oldSnap.Status) - $($oldSnap.Detail)"
+    $newSnap = @($snapRows | Where-Object { $_.Detail -match 'after-patching' })
+    Assert-That 'a recent snapshot with no resolvable size is still reported' `
+        ($newSnap.Count -eq 1 -and $newSnap[0].Status -eq 'INFO' -and $newSnap[0].Detail -match 'age 1d') `
+        "got: $($newSnap.Status) - $($newSnap.Detail)"
+
     # The EVC detail spells the acronym out; that wording was lost in the same
     # revert that took the ConnectionState fix.
     $evcRow = @($r.Rows | Where-Object { $_.Check -eq 'EVC' })
@@ -460,6 +491,13 @@ try {
     Assert-That 'no host is reported as unmatched to a vCenter' `
         (@($r.Rows | Where-Object { $_.Check -eq 'VersionVsVCenter' -and $_.Status -eq 'INFO' }).Count -eq 0) `
         (($r.Rows | Where-Object { $_.Check -eq 'VersionVsVCenter' -and $_.Status -eq 'INFO' } | ForEach-Object { $_.Detail }) -join '; ')
+
+    # No VM in this scenario has a snapshot, so the other half of the sizing
+    # contract holds: the PowerCLI retrieval is skipped entirely rather than
+    # run over the whole inventory to discover there was nothing to size.
+    Assert-That 'no snapshots anywhere means no sizing calls at all' `
+        (@($r.Calls | Where-Object { $_ -like 'Get-VM*' -or $_ -eq 'Get-Snapshot' }).Count -eq 0) `
+        "got: $($r.Calls -join ', ')"
 
     # --- ConnectFail --------------------------------------------------------
     Write-Host "`nScenario: ConnectFail" -ForegroundColor Cyan
