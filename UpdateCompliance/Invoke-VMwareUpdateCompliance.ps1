@@ -135,7 +135,7 @@ function Add-Result {
         [string] $Category,
         [string] $Object,
         [string] $Check,
-        [ValidateSet('PASS','WARN','FAIL','INFO')] [string] $Status,
+        [ValidateSet('NORMAL','WARN','FAIL','INFO')] [string] $Status,
         [string] $Detail
     )
     $script:Results.Add([pscustomobject]@{
@@ -146,7 +146,7 @@ function Add-Result {
         Detail   = $Detail
     })
     $color = switch ($Status) {
-        'PASS' { 'Green' }
+        'NORMAL' { 'Green' }
         'WARN' { 'Yellow' }
         'FAIL' { 'Red' }
         default { 'Gray' }
@@ -249,7 +249,7 @@ try {
 
         switch ($verStatus) {
             'guestToolsCurrent' {
-                Add-Result 'VMwareTools' $vm.Name 'ToolsStatus' 'PASS' "Current (v$toolsVer)"
+                Add-Result 'VMwareTools' $vm.Name 'ToolsStatus' 'NORMAL' "Current (v$toolsVer)"
             }
             { $_ -in 'guestToolsNeedUpgrade','guestToolsSupportedOld','guestToolsTooOld' } {
                 Add-Result 'VMwareTools' $vm.Name 'ToolsStatus' 'WARN' "Needs upgrade (v$toolsVer, status $verStatus)"
@@ -285,7 +285,7 @@ try {
             Add-Result 'HardwareVersion' $vm.Name 'Compatibility' 'WARN' "$hwVersion (below target vmx-$targetHwNum)"
             $hwToUpgrade.Add($vm)
         } else {
-            Add-Result 'HardwareVersion' $vm.Name 'Compatibility' 'PASS' "$hwVersion (>= target vmx-$targetHwNum)"
+            Add-Result 'HardwareVersion' $vm.Name 'Compatibility' 'NORMAL' "$hwVersion (>= target vmx-$targetHwNum)"
         }
     }
     #endregion
@@ -394,7 +394,7 @@ finally {
  .content { flex: 1; min-width: 0; padding: 24px; }
  .meta-line { color: var(--muted); font-size: 13px; margin: 0 0 16px; }
  /* The tiles AND the filter buttons freeze together as one toolbar. Freezing
-    only the tiles left the FAIL/WARN/INFO/PASS buttons - and their counts -
+    only the tiles left the FAIL/WARN/INFO/NORMAL buttons - and their counts -
     scrolling away under it. Negative margin + matching padding bleeds the
     background across .content's 24px gutters, so rows scrolling underneath
     don't show through at the edges. */
@@ -411,8 +411,8 @@ finally {
  .stat-tile.stat-WARN .stat-num { color: var(--warn); }
  .stat-tile.stat-INFO { border-left-color: var(--info); }
  .stat-tile.stat-INFO .stat-num { color: var(--info); }
- .stat-tile.stat-PASS { border-left-color: var(--ok); }
- .stat-tile.stat-PASS .stat-num { color: var(--ok); }
+ .stat-tile.stat-NORMAL { border-left-color: var(--ok); }
+ .stat-tile.stat-NORMAL .stat-num { color: var(--ok); }
  .stat-tile.active { box-shadow: 0 0 0 2px var(--accent) inset; }
  .filters { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 20px; }
  .filters button { font: inherit; font-size: 13px; padding: 7px 14px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); color: var(--text); cursor: pointer; }
@@ -424,7 +424,7 @@ finally {
  th { background: var(--brand-2); color: #fff; font-weight: 600; }
  tr:hover td { background: #f5f8fb; }
  .badge { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 11px; font-weight: 700; letter-spacing: .03em; }
- .badge-PASS { background: var(--ok-bg); color: var(--ok); }
+ .badge-NORMAL { background: var(--ok-bg); color: var(--ok); }
  .badge-WARN { background: var(--warn-bg); color: var(--warn); }
  .badge-FAIL { background: var(--crit-bg); color: var(--crit); }
  .badge-INFO { background: var(--info-bg); color: var(--info); }
@@ -449,7 +449,7 @@ finally {
     $cFail = @($script:Results | Where-Object { $_.Status -eq 'FAIL' }).Count
     $cWarn = @($script:Results | Where-Object { $_.Status -eq 'WARN' }).Count
     $cInfo = @($script:Results | Where-Object { $_.Status -eq 'INFO' }).Count
-    $cPass = @($script:Results | Where-Object { $_.Status -eq 'PASS' }).Count
+    $cNormal = @($script:Results | Where-Object { $_.Status -eq 'NORMAL' }).Count
     $cAttn = $cFail + $cWarn
     # $script:Results is a List[object]; read .Count directly. Wrapping it as
     # @($script:Results).Count throws "Argument types do not match" in WinPS 5.1.
@@ -524,14 +524,14 @@ $secRows
    <button class="stat-tile stat-FAIL" data-filter="FAIL"><span class="stat-num">$cFail</span><span class="stat-label">Fail</span></button>
    <button class="stat-tile stat-WARN" data-filter="WARN"><span class="stat-num">$cWarn</span><span class="stat-label">Warn</span></button>
    <button class="stat-tile stat-INFO" data-filter="INFO"><span class="stat-num">$cInfo</span><span class="stat-label">Info</span></button>
-   <button class="stat-tile stat-PASS" data-filter="PASS"><span class="stat-num">$cPass</span><span class="stat-label">Pass</span></button>
+   <button class="stat-tile stat-NORMAL" data-filter="NORMAL"><span class="stat-num">$cNormal</span><span class="stat-label">Pass</span></button>
   </div>
   <div class="filters">
    <button data-filter="attention" class="active">Needs attention &mdash; FAIL + WARN ($cAttn)</button>
    <button data-filter="FAIL">FAIL ($cFail)</button>
    <button data-filter="WARN">WARN ($cWarn)</button>
    <button data-filter="INFO">INFO ($cInfo)</button>
-   <button data-filter="PASS">PASS ($cPass)</button>
+   <button data-filter="NORMAL">NORMAL ($cNormal)</button>
    <button data-filter="all">All ($cAll)</button>
   </div>
   </div>
