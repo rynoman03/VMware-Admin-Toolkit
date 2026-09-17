@@ -138,6 +138,8 @@ function Write-FixtureCall {
 }
 
 function New-FixtureDevice {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '',
+        Justification = 'Builds an in-memory object for the fixture; changes no system state.')]
     param([string] $Kind, [string] $FileName, [bool] $Connected, [bool] $StartConnected)
     $d = New-Object "VMware.Vim.$Kind"
     $d.Connectable = New-Object VMware.Vim.VirtualDeviceConnectInfo
@@ -153,6 +155,8 @@ function New-FixtureDevice {
 # A HostSystem view in the shape Get-View returns it, carrying every property
 # the health check asks for in its -Property list.
 function New-FixtureHostView {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '',
+        Justification = 'Builds an in-memory object for the fixture; changes no system state.')]
     param(
         [string] $Name,
         [string] $MoRef,
@@ -226,6 +230,8 @@ function New-FixtureHostView {
 }
 
 function New-FixtureVmView {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '',
+        Justification = 'Builds an in-memory object for the fixture; changes no system state.')]
     param(
         [string] $Name,
         [string] $MoRef,
@@ -262,7 +268,7 @@ function New-FixtureVmView {
     }
 }
 
-function Get-FixtureHostViews {
+function Get-FixtureHostView {
     param($Server)
     switch (Get-FixtureScenario) {
         'HostDown' {
@@ -293,7 +299,7 @@ function Get-FixtureHostViews {
     }
 }
 
-function Get-FixtureVmViews {
+function Get-FixtureVmView {
     $vms = @( New-FixtureVmView -Name 'app01' -MoRef 'VirtualMachine-vm-101' `
                 -HardwareVersion $(if ((Get-FixtureScenario) -eq 'Degraded') { 'unknown' } else { 'vmx-19' }) )
 
@@ -310,7 +316,7 @@ function Get-FixtureVmViews {
     $vms
 }
 
-function Get-FixtureClusterViews {
+function Get-FixtureClusterView {
     $clusters = @([pscustomobject]@{
         Name          = 'CL-FIXTURE'
         MoRef         = 'ClusterComputeResource-domain-c1'
@@ -349,7 +355,7 @@ function Get-FixtureClusterViews {
     $clusters
 }
 
-function Get-FixtureDatastoreViews {
+function Get-FixtureDatastoreView {
     $stores = @([pscustomobject]@{
         Name    = 'DS-FIXTURE-01'
         MoRef   = 'Datastore-datastore-1'
@@ -397,12 +403,12 @@ function Get-View {
 
     Write-FixtureCall "Get-View:$ViewType"
     switch ($ViewType) {
-        'HostSystem'             { return (Get-FixtureHostViews -Server $Server) }
-        'VirtualMachine'         { return (Get-FixtureVmViews) }
-        'ClusterComputeResource' { return (Get-FixtureClusterViews) }
-        'Datastore'              { return (Get-FixtureDatastoreViews) }
+        'HostSystem'             { return (Get-FixtureHostView -Server $Server) }
+        'VirtualMachine'         { return (Get-FixtureVmView) }
+        'ClusterComputeResource' { return (Get-FixtureClusterView) }
+        'Datastore'              { return (Get-FixtureDatastoreView) }
         'ComputeResource'        {
-            return @(Get-FixtureClusterViews | ForEach-Object {
+            return @(Get-FixtureClusterView | ForEach-Object {
                 [pscustomobject]@{
                     Name               = $_.Name
                     MoRef              = $_.MoRef
@@ -422,7 +428,7 @@ function Get-VM {
     param([Parameter(ValueFromPipeline)] $InputObject, $Server)
     process {
         Write-FixtureCall 'Get-VM'
-        @(Get-FixtureVmViews | ForEach-Object {
+        @(Get-FixtureVmView | ForEach-Object {
             [pscustomobject]@{
                 Name          = $_.Name
                 ExtensionData = [pscustomobject]@{ MoRef = $_.MoRef }
