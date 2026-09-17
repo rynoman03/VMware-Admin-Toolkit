@@ -114,6 +114,8 @@ function Invoke-Scenario {
     $env:HEALTHCHECK_FIXTURE_SCENARIO = $Scenario
     $probe = Join-Path $dir 'powercli-config.txt'
     $env:HEALTHCHECK_FIXTURE_PROBE = $probe
+    $callLog = Join-Path $dir 'inventory-calls.txt'
+    $env:HEALTHCHECK_FIXTURE_CALLLOG = $callLog
     # Windows PowerShell turns anything a native command writes to stderr into
     # an error record, which the Stop preference above makes terminating. The
     # ConnectFail scenario writes to stderr by design, so that would abort the
@@ -134,13 +136,15 @@ function Invoke-Scenario {
         $ErrorActionPreference = $savedEap
         Remove-Item Env:\HEALTHCHECK_FIXTURE_SCENARIO -ErrorAction SilentlyContinue
         Remove-Item Env:\HEALTHCHECK_FIXTURE_PROBE -ErrorAction SilentlyContinue
+        Remove-Item Env:\HEALTHCHECK_FIXTURE_CALLLOG -ErrorAction SilentlyContinue
     }
 
     $csv  = Get-ChildItem -Path $dir -Filter '*.csv'  -ErrorAction SilentlyContinue | Select-Object -First 1
     $html = Get-ChildItem -Path $dir -Filter '*.html' -ErrorAction SilentlyContinue | Select-Object -First 1
 
     [pscustomobject]@{
-        Scenario = $Scenario
+        Scenario  = $Scenario
+        Calls     = if (Test-Path $callLog) { @(Get-Content -LiteralPath $callLog) } else { @() }
         ExitCode = $code
         Rows     = if ($csv) { @(Import-Csv -Path $csv.FullName) } else { @() }
         Csv      = $csv
@@ -196,6 +200,25 @@ try {
     Assert-That 'cluster RAM row is present' ((Get-ResultRow $r.Rows 'CL-FIXTURE' 'ClusterRAM').Count -eq 1)
     Assert-That 'storage paths are walked' `
         ((Get-ResultRow $r.Rows 'esx01.fixture.local' 'PathState')[0].Status -eq 'PASS')
+
+    # Inventory is read in bulk, so the number of API calls must depend on the
+    # number of CONNECTIONS, not on how many hosts, LUNs or VMs there are.
+    # Behavioural assertions alone would not notice a refactor that quietly
+    # reintroduced a per-host or per-LUN round-trip, so count them directly.
+    # One connection, two hosts, two LUNs each, one VM:
+    #   HostSystem, ComputeResource, ClusterComputeResource, Datastore,
+    #   VirtualMachine  (5 Get-View) + Get-VM + Get-Snapshot
+    Assert-That 'inventory is read in a fixed number of bulk calls' `
+        ($r.Calls.Count -le 8) "made $($r.Calls.Count) calls: $($r.Calls -join ', ')"
+    Assert-That 'exactly one HostSystem view call for all hosts' `
+        (@($r.Calls | Where-Object { $_ -eq 'Get-View:HostSystem' }).Count -eq 1) `
+        "got: $($r.Calls -join ', ')"
+    Assert-That 'exactly one VirtualMachine view call for all VMs' `
+        (@($r.Calls | Where-Object { $_ -eq 'Get-View:VirtualMachine' }).Count -eq 1) `
+        "got: $($r.Calls -join ', ')"
+    Assert-That 'no per-LUN or per-host storage calls remain' `
+        (@($r.Calls | Where-Object { $_ -match 'ScsiLun|VMHostService|AdvancedSetting|CDDrive|FloppyDrive' }).Count -eq 0) `
+        "got: $($r.Calls -join ', ')"
 
     # The EVC detail spells the acronym out; that wording was lost in the same
     # revert that took the ConnectionState fix.

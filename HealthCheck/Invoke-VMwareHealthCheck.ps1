@@ -33,13 +33,15 @@
 .PARAMETER ClusterUsageWarnPercent
     Cluster CPU/RAM usage at or above this % is WARN. Default 80.
 
-.PARAMETER OSDriveFreeWarnGB
-    Guest OS system drive (C:\ on Windows, / on Linux) with less than this many GB
-    free is flagged. Requires VMware Tools running in the guest. Default 20.
+.PARAMETER OSDriveFreeWarnPercent
+    Guest OS system drive (C:\ on Windows, / on Linux) with less than this
+    percentage free is flagged. Requires VMware Tools running in the guest.
+    Default 15. A percentage rather than a GB figure because 20GB free is
+    comfortable on a 1TB disk and nearly full on a 40GB one.
 
-.PARAMETER DataDriveFreeWarnGB
-    Any other guest drive (non-OS volume) with less than this many GB free is
-    flagged. Requires VMware Tools running in the guest. Default 10.
+.PARAMETER DataDriveFreeWarnPercent
+    Any other guest drive (non-OS volume) with less than this percentage free
+    is flagged. Requires VMware Tools running in the guest. Default 10.
 
 .PARAMETER CertExpiryWarnDays
     ESXi host and vCenter TLS certificates expiring within this many days are
@@ -241,8 +243,8 @@ param(
     [int] $DatastoreFreeWarnPercent = 20,
     [int] $DatastoreFreeCritPercent = 10,
     [int] $ClusterUsageWarnPercent  = 80,
-    [int] $OSDriveFreeWarnGB        = 20,
-    [int] $DataDriveFreeWarnGB      = 10,
+    [int] $OSDriveFreeWarnPercent   = 15,
+    [int] $DataDriveFreeWarnPercent = 10,
     [int] $HardwareVersionWarnNum   = 13,
     [int] $CertExpiryWarnDays       = 30,
     [int] $CertExpiryCritDays       = 7,
@@ -370,28 +372,26 @@ function Compare-TargetBaseline {
 }
 
 function Get-MaxHardwareVersion {
-    # Highest VM hardware version the VM's host/cluster can actually run, asked
-    # of the compute resource's EnvironmentBrowser rather than inferred from a
-    # hardcoded ESXi-version table (which goes stale every release). For a
-    # cluster this is already the common denominator across its hosts, so a
-    # recommendation based on it stays vMotion-safe.
-    # Returns $null if it can't be determined; cached per host name since the
-    # answer is identical for every VM on the same host.
+    # Highest VM hardware version a compute resource can run, asked of its
+    # EnvironmentBrowser rather than inferred from a hardcoded ESXi-version
+    # table (which goes stale every release). For a cluster this is already
+    # the common denominator across its hosts, so a recommendation based on
+    # it stays vMotion-safe.
+    # Keyed on the COMPUTE RESOURCE, not the host: every host in a cluster
+    # shares one EnvironmentBrowser, so a per-host cache asked vCenter the
+    # same question once per host instead of once per cluster.
+    # Returns $null if it can't be determined.
     param(
-        [object]    $VMHost,
+        [string]    $ComputeResourceMoRef,
+        [object]    $EnvironmentBrowser,
         [hashtable] $Cache
     )
-    # A VM's host reference can be a non-null object whose .Name is itself
-    # null or empty - e.g. an orphaned/inaccessible VM whose host relationship
-    # is broken - which $Cache.ContainsKey(...) throws on ("Value cannot be
-    # null. (Parameter 'key')") rather than returning $false. Guard both.
-    if (-not $VMHost -or [string]::IsNullOrEmpty($VMHost.Name)) { return $null }
-    if ($Cache.ContainsKey($VMHost.Name)) { return $Cache[$VMHost.Name] }
+    if ([string]::IsNullOrEmpty($ComputeResourceMoRef) -or -not $EnvironmentBrowser) { return $null }
+    if ($Cache.ContainsKey($ComputeResourceMoRef)) { return $Cache[$ComputeResourceMoRef] }
 
     $max = $null
     try {
-        $computeResource = Get-View -Id $VMHost.ExtensionData.Parent -Property EnvironmentBrowser -ErrorAction Stop
-        $envBrowser      = Get-View -Id $computeResource.EnvironmentBrowser -ErrorAction Stop
+        $envBrowser = Get-View -Id $EnvironmentBrowser -ErrorAction Stop
         foreach ($descriptor in @($envBrowser.QueryConfigOptionDescriptor())) {
             if ($descriptor.Key -match 'vmx-(\d+)') {
                 $n = [int]$Matches[1]
@@ -399,10 +399,39 @@ function Get-MaxHardwareVersion {
             }
         }
     } catch {
+        Write-Verbose "Could not query EnvironmentBrowser for '$ComputeResourceMoRef': $($_.Exception.Message)"
         $max = $null
     }
-    $Cache[$VMHost.Name] = $max
+    $Cache[$ComputeResourceMoRef] = $max
     return $max
+}
+
+# Flattens a VM's snapshot tree - RootSnapshotList plus every
+# ChildSnapshotList beneath it - into one list, so nested snapshots are
+# reported rather than only the roots.
+function Get-SnapshotNode {
+    param([object] $Nodes)
+    foreach ($n in @($Nodes)) {
+        if (-not $n) { continue }
+        $n
+        if ($n.ChildSnapshotList) { Get-SnapshotNode -Nodes $n.ChildSnapshotList }
+    }
+}
+
+# Value of one ESXi advanced setting, read from the Config.Option array that
+# was fetched with the host view. Replaces a per-host, per-setting
+# Get-AdvancedSetting round-trip.
+function Get-HostOptionValue {
+    param(
+        [object] $HostView,
+        [string] $Name
+    )
+    $opts = $HostView.Config.Option
+    if ($null -eq $opts) { return $null }
+    foreach ($o in $opts) {
+        if ($o.Key -eq $Name) { return $o.Value }
+    }
+    return $null
 }
 
 function Format-LunList {
@@ -537,71 +566,104 @@ try {
         }
     }
 
-    # Enumerate hosts one connection at a time, rather than handing every
-    # connection to a single Get-VMHost, so each host is paired with the
-    # vCenter that manages it by construction. Deriving that from the host's
-    # .Uid is unreliable: an SSO login such as administrator@vsphere.local puts
-    # a second '@' in the Uid, so the managing server can't be picked out of it
-    # with a simple match. Connect-VIServer's connection object already carries
-    # .Version/.Build, so the comparison below needs no extra API call.
-    $hostEntries = New-Object System.Collections.Generic.List[object]
+    # ---- Inventory prefetch -------------------------------------------
+    # Everything the host checks need is pulled in ONE Get-View per connection
+    # instead of a Get-VMHost plus a Get-VMHostService / Get-VMHostNtpServer /
+    # Get-VMHostSysLogServer / Get-AdvancedSetting / Get-Datastore / Get-ScsiLun
+    # per host, and a Get-ScsiLunPath per LUN. On a host with 40 LUNs that was
+    # 45+ round-trips; it is now a share of one.
+    # Hosts are still enumerated per connection so each is paired with the
+    # vCenter that manages it by construction - deriving that from a .Uid is
+    # unreliable, since an SSO login like administrator@vsphere.local puts a
+    # second '@' in it.
+    $hostProps = @(
+        'Name', 'Parent', 'Datastore',
+        'Runtime.ConnectionState', 'Runtime.BootTime',
+        'Config.Product', 'Config.Certificate', 'Config.LockdownMode',
+        'Config.Service.Service', 'Config.DateTimeInfo.NtpConfig.Server',
+        'Config.Option', 'Config.StorageDevice.ScsiLun', 'Config.StorageDevice.MultipathInfo',
+        'Summary.Hardware', 'Summary.QuickStats'
+    )
+
+    $hostEntries    = New-Object System.Collections.Generic.List[object]
+    $clusterEntries = New-Object System.Collections.Generic.List[object]
+    $dsEntries      = New-Object System.Collections.Generic.List[object]
+    $dsByMoRef      = @{}   # datastore MoRef -> view
+    $envBrowserByCr = @{}   # compute resource MoRef -> EnvironmentBrowser MoRef
+    $hostByMoRef    = @{}   # host MoRef -> view, for pairing VMs to their host
+
     foreach ($conn in $connections) {
-        foreach ($h in (Get-VMHost -Server $conn)) {
-            $hostEntries.Add([pscustomobject]@{ VMHost = $h; VCenter = $conn })
+        foreach ($hv in @(Get-View -ViewType HostSystem -Property $hostProps -Server $conn)) {
+            $hostEntries.Add([pscustomobject]@{ View = $hv; VCenter = $conn })
+            $hostByMoRef[$hv.MoRef.ToString()] = $hv
+        }
+        # One call covers standalone hosts and clusters alike: ComputeResource
+        # is the base type, so this is where every host's EnvironmentBrowser
+        # comes from - one per cluster rather than one per host.
+        foreach ($cr in @(Get-View -ViewType ComputeResource -Property Name,EnvironmentBrowser -Server $conn)) {
+            $envBrowserByCr[$cr.MoRef.ToString()] = $cr.EnvironmentBrowser
+        }
+        foreach ($cv in @(Get-View -ViewType ClusterComputeResource -Property Name,Host,Summary,Configuration -Server $conn)) {
+            $clusterEntries.Add($cv)
+        }
+        foreach ($dv in @(Get-View -ViewType Datastore -Property Name,Summary,Host -Server $conn)) {
+            $dsEntries.Add($dv)
+            $dsByMoRef[$dv.MoRef.ToString()] = $dv
         }
     }
+    Write-Host ("  Prefetched {0} host(s), {1} cluster(s), {2} datastore(s)." -f `
+        $hostEntries.Count, $clusterEntries.Count, $dsEntries.Count) -ForegroundColor DarkGray
 
     foreach ($entry in $hostEntries) {
-        $h      = $entry.VMHost
+        $hv     = $entry.View
         $vcConn = $entry.VCenter
+        $hName  = $hv.Name
 
         # Connection / power state
-        if ($h.ConnectionState -ne 'Connected') {
-            # Every check below queries the host itself, which vCenter can't
-            # reach in this state: the cmdlets emit raw errors that never reach
-            # the report, and properties such as Runtime.BootTime come back
-            # null. Record the state and move on to the next host.
-            Add-Result 'HostHealth' $h.Name 'ConnectionState' 'FAIL' "State is $($h.ConnectionState) - remaining host checks skipped"
+        if ([string]$hv.Runtime.ConnectionState -ne 'connected') {
+            # Every check below reads host-side config that vCenter cannot
+            # refresh in this state, so the values would be stale or absent.
+            Add-Result 'HostHealth' $hName 'ConnectionState' 'FAIL' "State is $($hv.Runtime.ConnectionState) - remaining host checks skipped"
             continue
         }
-        Add-Result 'HostHealth' $h.Name 'ConnectionState' 'PASS' 'Connected'
+        Add-Result 'HostHealth' $hName 'ConnectionState' 'PASS' 'Connected'
 
         # ESXi build vs vCenter build. VMware only supports ESXi hosts within
         # roughly N-2 major versions of vCenter, and a host *newer* than
         # vCenter is unsupported outright and can break management features.
-        # $vcConn came from the enumeration above, so it is always the vCenter
-        # this host is actually registered to.
+        $hVersion = $hv.Config.Product.Version
+        $hBuild   = $hv.Config.Product.Build
         $hostMajor = 0; $hostMinor = 0
-        if ($h.Version -match '^(\d+)\.(\d+)') { $hostMajor = [int]$Matches[1]; $hostMinor = [int]$Matches[2] }
+        if ($hVersion -match '^(\d+)\.(\d+)') { $hostMajor = [int]$Matches[1]; $hostMinor = [int]$Matches[2] }
         $vcMajor = 0; $vcMinor = 0
         if ($vcConn.Version -match '^(\d+)\.(\d+)') { $vcMajor = [int]$Matches[1]; $vcMinor = [int]$Matches[2] }
 
         if ($hostMajor -eq 0 -or $vcMajor -eq 0) {
-            Add-Result 'HostHealth' $h.Name 'VersionVsVCenter' 'INFO' "Could not parse version (host $($h.Version)/$($h.Build), vCenter $($vcConn.Version)/$($vcConn.Build))"
+            Add-Result 'HostHealth' $hName 'VersionVsVCenter' 'INFO' "Could not parse version (host $hVersion/$hBuild, vCenter $($vcConn.Version)/$($vcConn.Build))"
         } elseif ($hostMajor -gt $vcMajor -or ($hostMajor -eq $vcMajor -and $hostMinor -gt $vcMinor)) {
-            Add-Result 'HostHealth' $h.Name 'VersionVsVCenter' 'FAIL' "ESXi $($h.Version) build $($h.Build) is NEWER than vCenter $($vcConn.Version) build $($vcConn.Build) - unsupported, management features may break"
+            Add-Result 'HostHealth' $hName 'VersionVsVCenter' 'FAIL' "ESXi $hVersion build $hBuild is NEWER than vCenter $($vcConn.Version) build $($vcConn.Build) - unsupported, management features may break"
         } elseif ($hostMajor -lt ($vcMajor - $HostVersionSkewFailMajors)) {
             # -lt, not -le: the parameter is documented as "*more than* this
             # many major versions behind", so a host exactly N behind is the
             # WARN case, not FAIL.
-            Add-Result 'HostHealth' $h.Name 'VersionVsVCenter' 'FAIL' "ESXi $($h.Version) is $($vcMajor - $hostMajor) major version(s) behind vCenter $($vcConn.Version) - outside VMware's supported interop range"
-        } elseif ($h.Version -ne $vcConn.Version) {
-            Add-Result 'HostHealth' $h.Name 'VersionVsVCenter' 'WARN' "ESXi $($h.Version) build $($h.Build) differs from vCenter $($vcConn.Version) build $($vcConn.Build)"
+            Add-Result 'HostHealth' $hName 'VersionVsVCenter' 'FAIL' "ESXi $hVersion is $($vcMajor - $hostMajor) major version(s) behind vCenter $($vcConn.Version) - outside VMware's supported interop range"
+        } elseif ($hVersion -ne $vcConn.Version) {
+            Add-Result 'HostHealth' $hName 'VersionVsVCenter' 'WARN' "ESXi $hVersion build $hBuild differs from vCenter $($vcConn.Version) build $($vcConn.Build)"
         } else {
-            Add-Result 'HostHealth' $h.Name 'VersionVsVCenter' 'PASS' "ESXi $($h.Version) build $($h.Build) matches vCenter $($vcConn.Version) build $($vcConn.Build)"
+            Add-Result 'HostHealth' $hName 'VersionVsVCenter' 'PASS' "ESXi $hVersion build $hBuild matches vCenter $($vcConn.Version) build $($vcConn.Build)"
         }
 
-        # Host services, fetched once and shared with the SSH check below.
-        $hostServices = @($h | Get-VMHostService)
+        # Host services came with the view; no per-host service query.
+        $hostServices = @($hv.Config.Service.Service)
 
         # NTP - servers configured, daemon running, and (optionally) the
         # configured servers matching the -ExpectedNtpServer baseline.
-        $ntpServers = @($h | Get-VMHostNtpServer)
+        $ntpServers = @($hv.Config.DateTimeInfo.NtpConfig.Server)
         $ntpSvc     = $hostServices | Where-Object { $_.Key -eq 'ntpd' }
         if ($ntpServers.Count -eq 0) {
             $detail = 'No NTP servers configured'
             if ($ExpectedNtpServer) { $detail += " - expected: $($ExpectedNtpServer -join ', ')" }
-            Add-Result 'HostHealth' $h.Name 'NTP' 'FAIL' $detail
+            Add-Result 'HostHealth' $hName 'NTP' 'FAIL' $detail
         } else {
             $ntpIssues = New-Object System.Collections.Generic.List[object]
             if ($null -eq $ntpSvc) {
@@ -622,41 +684,29 @@ try {
             if ($ntpIssues.Count -gt 0) {
                 $detail = "Configured: $($ntpServers -join ', ') | $($ntpIssues -join ' | ')"
                 if ($ExpectedNtpServer) { $detail += " | Expected: $($ExpectedNtpServer -join ', ')" }
-                Add-Result 'HostHealth' $h.Name 'NTP' 'WARN' $detail
+                Add-Result 'HostHealth' $hName 'NTP' 'WARN' $detail
             } elseif ($ExpectedNtpServer) {
-                Add-Result 'HostHealth' $h.Name 'NTP' 'PASS' "Running; servers: $($ntpServers -join ', ') (matches expected baseline)"
+                Add-Result 'HostHealth' $hName 'NTP' 'PASS' "Running; servers: $($ntpServers -join ', ') (matches expected baseline)"
             } else {
-                Add-Result 'HostHealth' $h.Name 'NTP' 'PASS' "Running; servers: $($ntpServers -join ', ')"
+                Add-Result 'HostHealth' $hName 'NTP' 'PASS' "Running; servers: $($ntpServers -join ', ')"
             }
         }
 
-        # Syslog - remote target configured, and (optionally) matching the
-        # -ExpectedSyslogServer baseline.
-        $syslog       = @($h | Get-VMHostSysLogServer)
-        $syslogActual = @($syslog | ForEach-Object {
-            # Bracket a bare IPv6 literal before appending the port, or
-            # 'fd00::10' + ':514' reads back as one unparseable host. Only a
-            # BARE literal: ESXi often reports Host with the scheme already on
-            # it ('udp://loghost:514'), and that contains a colon too -
-            # bracketing it produced '[udp://loghost]:514', which parses back
-            # as the host '[udp:' and can never match a baseline.
-            $sysHost = "$($_.Host)"
-            if ($sysHost -like '*:*' -and $sysHost -notlike '*/*' -and $sysHost -notlike '`[*') {
-                $sysHost = "[$sysHost]"
-            }
-            # Don't append a port the host string already carries.
-            if ($_.Port -and $sysHost -notmatch ':\d+$') { "${sysHost}:$($_.Port)" } else { $sysHost }
-        })
+        # Syslog - ESXi keeps the remote target(s) in the Syslog.global.logHost
+        # advanced setting as a comma-separated list, already in the
+        # 'udp://host:514' form the baseline comparison normalizes.
+        $syslogActual = @(("$(Get-HostOptionValue -HostView $hv -Name 'Syslog.global.logHost')" -split ',') |
+                          ForEach-Object { $_.Trim() } | Where-Object { $_ })
         if ($syslogActual.Count -eq 0) {
             if ($ExpectedSyslogServer) {
                 # A baseline was supplied, so a remote collector is required here -
                 # nothing configured means the requirement is entirely unmet.
-                Add-Result 'HostHealth' $h.Name 'Syslog' 'FAIL' "No remote syslog target configured - expected: $($ExpectedSyslogServer -join ', ')"
+                Add-Result 'HostHealth' $hName 'Syslog' 'FAIL' "No remote syslog target configured - expected: $($ExpectedSyslogServer -join ', ')"
             } else {
-                Add-Result 'HostHealth' $h.Name 'Syslog' 'WARN' 'No remote syslog target configured'
+                Add-Result 'HostHealth' $hName 'Syslog' 'WARN' 'No remote syslog target configured'
             }
         } elseif (-not $ExpectedSyslogServer) {
-            Add-Result 'HostHealth' $h.Name 'Syslog' 'PASS' "Target: $($syslogActual -join ', ')"
+            Add-Result 'HostHealth' $hName 'Syslog' 'PASS' "Target: $($syslogActual -join ', ')"
         } else {
             $sysCmp    = Compare-TargetBaseline -Actual $syslogActual -Expected $ExpectedSyslogServer
             $sysIssues = New-Object System.Collections.Generic.List[object]
@@ -668,56 +718,68 @@ try {
             }
 
             if ($sysIssues.Count -gt 0) {
-                Add-Result 'HostHealth' $h.Name 'Syslog' 'WARN' "Configured: $($syslogActual -join ', ') | $($sysIssues -join ' | ') | Expected: $($ExpectedSyslogServer -join ', ')"
+                Add-Result 'HostHealth' $hName 'Syslog' 'WARN' "Configured: $($syslogActual -join ', ') | $($sysIssues -join ' | ') | Expected: $($ExpectedSyslogServer -join ', ')"
             } else {
-                Add-Result 'HostHealth' $h.Name 'Syslog' 'PASS' "Target: $($syslogActual -join ', ') (matches expected baseline)"
+                Add-Result 'HostHealth' $hName 'Syslog' 'PASS' "Target: $($syslogActual -join ', ') (matches expected baseline)"
             }
         }
 
         # Uptime (informational; very long uptime can mean missed patching)
-        $uptimeDays = [math]::Round((New-TimeSpan -Start $h.ExtensionData.Summary.Runtime.BootTime -End (Get-Date)).TotalDays, 1)
-        Add-Result 'HostHealth' $h.Name 'Uptime' 'INFO' "$uptimeDays days"
+        if ($null -eq $hv.Runtime.BootTime) {
+            Add-Result 'HostHealth' $hName 'Uptime' 'INFO' 'Boot time not reported by vCenter for this host'
+        } else {
+            $uptimeDays = [math]::Round((New-TimeSpan -Start $hv.Runtime.BootTime -End (Get-Date)).TotalDays, 1)
+            Add-Result 'HostHealth' $hName 'Uptime' 'INFO' "$uptimeDays days"
+        }
 
-        # Datastore connectivity - any datastore not accessible from this host
-        # An unpopulated Summary makes '-not $_...Accessible' true, which would
-        # report a perfectly healthy datastore as inaccessible. Separate the
-        # three cases: definitely inaccessible, definitely fine, and unknown.
-        $dsList       = @($h | Get-Datastore)
-        $inaccessible = @($dsList | Where-Object { $null -ne $_.ExtensionData.Summary -and -not $_.ExtensionData.Summary.Accessible })
-        $dsUnknown    = @($dsList | Where-Object { $null -eq $_.ExtensionData.Summary })
+        # Datastore connectivity - resolved from the datastore views already
+        # fetched, via the MoRefs the host view carries. No per-host query.
+        # An unpopulated Summary must not read as "inaccessible", so the three
+        # cases are kept apart: definitely inaccessible, definitely fine, unknown.
+        $dsList       = @(@($hv.Datastore) | ForEach-Object { $dsByMoRef[$_.ToString()] } | Where-Object { $_ })
+        $inaccessible = @($dsList | Where-Object { $null -ne $_.Summary -and -not $_.Summary.Accessible })
+        $dsUnknown    = @($dsList | Where-Object { $null -eq $_.Summary })
         if ($inaccessible.Count -gt 0) {
-            Add-Result 'HostHealth' $h.Name 'DatastoreConnectivity' 'FAIL' "Inaccessible: $(($inaccessible.Name) -join ',')"
+            Add-Result 'HostHealth' $hName 'DatastoreConnectivity' 'FAIL' "Inaccessible: $(($inaccessible.Name) -join ',')"
         } elseif ($dsUnknown.Count -gt 0) {
             # Saying "all accessible" here would be a false all-clear.
-            Add-Result 'HostHealth' $h.Name 'DatastoreConnectivity' 'INFO' "Accessibility not reported by vCenter for $($dsUnknown.Count) of $($dsList.Count) datastore(s): $(($dsUnknown.Name) -join ',')"
+            Add-Result 'HostHealth' $hName 'DatastoreConnectivity' 'INFO' "Accessibility not reported by vCenter for $($dsUnknown.Count) of $($dsList.Count) datastore(s): $(($dsUnknown.Name) -join ',')"
         } else {
-            Add-Result 'HostHealth' $h.Name 'DatastoreConnectivity' 'PASS' 'All datastores accessible'
+            Add-Result 'HostHealth' $hName 'DatastoreConnectivity' 'PASS' 'All datastores accessible'
         }
 
         # Storage path state - a LUN can still show as "accessible" on remaining
         # paths while one or more of its FC/iSCSI paths are dead, silently
         # running with reduced (or zero) redundancy. DatastoreConnectivity
         # above won't catch that; this walks the actual multipathing state.
+        # Config.StorageDevice came with the host view, so the whole walk -
+        # previously one Get-ScsiLunPath per LUN - costs nothing extra.
         # A dead HBA or fabric takes the same path off every LUN at once, so
         # LUNs are grouped by how much redundancy each has LEFT (what you'd
         # actually act on) rather than emitting one near-identical line per
         # LUN, which turns into an unreadable wall of text on a host with
         # dozens of LUNs.
-        $lunQueryError = $null
-        $luns = @($h | Get-ScsiLun -LunType disk -ErrorAction SilentlyContinue -ErrorVariable lunQueryError)
+        $diskLuns = @(@($hv.Config.StorageDevice.ScsiLun) | Where-Object { $_ -and $_.DeviceType -eq 'disk' })
+        $lunNameByKey = @{}
+        foreach ($lun in $diskLuns) { $lunNameByKey[[string]$lun.Key] = $lun.CanonicalName }
+        $pathsByLunKey = @{}
+        foreach ($mpLun in @($hv.Config.StorageDevice.MultipathInfo.Lun)) {
+            if ($mpLun) { $pathsByLunKey[[string]$mpLun.Lun] = @($mpLun.Path) }
+        }
+
         $pathIssues  = New-Object System.Collections.Generic.List[object]
         $totalPaths  = 0
         $offlineLuns = New-Object System.Collections.Generic.List[object]
         $degraded    = @{}   # "N of M paths active" -> list of LUN names
-        foreach ($lun in $luns) {
-            $paths = @(Get-ScsiLunPath -ScsiLun $lun -ErrorAction SilentlyContinue)
+        foreach ($lun in $diskLuns) {
+            $paths = @($pathsByLunKey[[string]$lun.Key])
             if ($paths.Count -eq 0) {
                 # Don't let a LUN whose paths can't be read count as healthy.
                 $pathIssues.Add($lun.CanonicalName)
                 continue
             }
             $totalPaths += $paths.Count
-            $dead = @($paths | Where-Object { $_.State -in @('Dead','Disabled') })
+            $dead = @($paths | Where-Object { $_.PathState -in @('dead','disabled') })
             if ($dead.Count -eq 0) { continue }
 
             $activeCount = $paths.Count - $dead.Count
@@ -736,16 +798,14 @@ try {
 
         if ($offlineLuns.Count -gt 0 -or $degradedCount -gt 0 -or $pathIssues.Count -gt 0) {
             # Headline counts first, then one grouped line per redundancy level,
-            # worst first. E.g.:
-            #   40 LUN(s): 2 offline, 12 degraded | OFFLINE - no active paths:
-            #   naa.aaa, naa.bbb | 3 of 4 paths active (12): naa.ccc, ... +8 more
+            # worst first.
             $counts = New-Object System.Collections.Generic.List[object]
             if ($offlineLuns.Count -gt 0) { $counts.Add("$($offlineLuns.Count) offline") }
             if ($degradedCount -gt 0)     { $counts.Add("$degradedCount degraded") }
             if ($pathIssues.Count -gt 0)  { $counts.Add("$($pathIssues.Count) unreadable") }
 
             $parts = New-Object System.Collections.Generic.List[object]
-            $parts.Add("$($luns.Count) LUN(s): $($counts -join ', ')")
+            $parts.Add("$($diskLuns.Count) LUN(s): $($counts -join ', ')")
             if ($offlineLuns.Count -gt 0) {
                 $parts.Add("OFFLINE - no active paths: $(Format-LunList $offlineLuns)")
             }
@@ -759,15 +819,16 @@ try {
             }
 
             $severity = if ($offlineLuns.Count -gt 0) { 'FAIL' } else { 'WARN' }
-            Add-Result 'HostHealth' $h.Name 'PathState' $severity ($parts -join ' | ')
-        } elseif ($luns.Count -gt 0) {
-            Add-Result 'HostHealth' $h.Name 'PathState' 'PASS' "$totalPaths path(s) across $($luns.Count) LUN(s), all active"
-        } elseif ($lunQueryError) {
-            # An empty result because the query failed is not the same as a host
-            # with no block storage; saying "NFS-only" here would be a false all-clear.
-            Add-Result 'HostHealth' $h.Name 'PathState' 'WARN' "Could not enumerate block storage LUNs: $($lunQueryError[0].Exception.Message)"
+            Add-Result 'HostHealth' $hName 'PathState' $severity ($parts -join ' | ')
+        } elseif ($diskLuns.Count -gt 0) {
+            Add-Result 'HostHealth' $hName 'PathState' 'PASS' "$totalPaths path(s) across $($diskLuns.Count) LUN(s), all active"
+        } elseif ($null -eq $hv.Config.StorageDevice) {
+            # An empty result because the data never arrived is not the same as
+            # a host with no block storage; "NFS-only" here would be a false
+            # all-clear.
+            Add-Result 'HostHealth' $hName 'PathState' 'WARN' 'Could not enumerate block storage LUNs for this host'
         } else {
-            Add-Result 'HostHealth' $h.Name 'PathState' 'INFO' 'No block storage LUNs found (e.g. NFS-only host)'
+            Add-Result 'HostHealth' $hName 'PathState' 'INFO' 'No block storage LUNs found (e.g. NFS-only host)'
         }
 
         # ESXi host TLS certificate expiry. Config.Certificate is a byte[] of
@@ -776,158 +837,124 @@ try {
         # first. X509Certificate2 accepts PEM bytes only on .NET 5+ (PowerShell
         # 7), so pull the base64 body out and hand it DER, which Windows
         # PowerShell 5.1 accepts too.
-        $hostCert  = $null
-        $certError = $null
         try {
-            $certBytes = $h.ExtensionData.Config.Certificate
-            if ($certBytes) {
-                $certText = [System.Text.Encoding]::ASCII.GetString([byte[]]$certBytes)
-                # Declared [byte[]] deliberately: assigning from an if/else
-                # expression unrolls the array into object[], and the ctor then
-                # binds to the (string fileName) overload instead of (byte[]).
-                [byte[]] $der = $null
-                if ($certText -match '(?s)-----BEGIN CERTIFICATE-----(.*?)-----END CERTIFICATE-----') {
-                    $der = [System.Convert]::FromBase64String(($Matches[1] -replace '\s', ''))
+            $certBytes = $hv.Config.Certificate
+            if (-not $certBytes) {
+                Add-Result 'HostHealth' $hName 'CertificateExpiry' 'INFO' 'Certificate info not available from vCenter'
+            } else {
+                $pem = [System.Text.Encoding]::ASCII.GetString($certBytes)
+                $b64 = ($pem -replace '-----BEGIN CERTIFICATE-----', '' -replace '-----END CERTIFICATE-----', '') -replace '\s', ''
+                $der = [Convert]::FromBase64String($b64)
+                $cert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($der)
+                $daysLeft = [math]::Round((New-TimeSpan -Start (Get-Date) -End $cert.NotAfter).TotalDays, 1)
+                if ($daysLeft -lt 0) {
+                    Add-Result 'HostHealth' $hName 'CertificateExpiry' 'FAIL' "Expired $([math]::Abs($daysLeft)) day(s) ago (NotAfter: $($cert.NotAfter))"
+                } elseif ($daysLeft -le $CertExpiryCritDays) {
+                    Add-Result 'HostHealth' $hName 'CertificateExpiry' 'FAIL' "Expires in $daysLeft day(s) (NotAfter: $($cert.NotAfter))"
+                } elseif ($daysLeft -le $CertExpiryWarnDays) {
+                    Add-Result 'HostHealth' $hName 'CertificateExpiry' 'WARN' "Expires in $daysLeft day(s) (NotAfter: $($cert.NotAfter))"
                 } else {
-                    $der = [byte[]]$certBytes   # already DER
+                    Add-Result 'HostHealth' $hName 'CertificateExpiry' 'PASS' "Valid until $($cert.NotAfter) ($daysLeft days)"
                 }
-                $hostCert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($der)
             }
         } catch {
-            $certError = $_.Exception.Message
-        }
-        if ($hostCert -and $hostCert.NotAfter) {
-            $daysLeft = [math]::Round((New-TimeSpan -Start (Get-Date) -End $hostCert.NotAfter).TotalDays, 1)
-            if ($daysLeft -lt 0) {
-                Add-Result 'HostHealth' $h.Name 'CertificateExpiry' 'FAIL' "Expired $([math]::Abs($daysLeft)) day(s) ago (NotAfter: $($hostCert.NotAfter))"
-            } elseif ($daysLeft -le $CertExpiryCritDays) {
-                Add-Result 'HostHealth' $h.Name 'CertificateExpiry' 'FAIL' "Expires in $daysLeft day(s) (NotAfter: $($hostCert.NotAfter))"
-            } elseif ($daysLeft -le $CertExpiryWarnDays) {
-                Add-Result 'HostHealth' $h.Name 'CertificateExpiry' 'WARN' "Expires in $daysLeft day(s) (NotAfter: $($hostCert.NotAfter))"
-            } else {
-                Add-Result 'HostHealth' $h.Name 'CertificateExpiry' 'PASS' "Valid until $($hostCert.NotAfter) ($daysLeft days)"
-            }
-        } elseif ($certError) {
-            Add-Result 'HostHealth' $h.Name 'CertificateExpiry' 'WARN' "Could not read host certificate: $certError"
-        } else {
-            Add-Result 'HostHealth' $h.Name 'CertificateExpiry' 'INFO' 'Certificate info not available from vCenter'
+            Add-Result 'HostHealth' $hName 'CertificateExpiry' 'INFO' "Could not read host certificate: $($_.Exception.Message)"
         }
 
         # Local account password expiration policy (root included). vCenter's API
         # doesn't expose a specific account's actual days-until-expiry - that lives
         # only in the host's local shadow file and would require SSH + `chage -l
         # root` to read. Security.PasswordMaxDays is the host-wide maximum age a
-        # local password may reach, which is what vCenter does expose.
-        try {
-            # A name that doesn't exist comes back as no output (or a null)
-            # rather than an error, and [int]$null is 0 - which would be
-            # reported below as a real value for a host we actually know
-            # nothing about. Filter the nulls out before counting: @($null)
-            # still has a Count of 1.
-            $pwSetting = @($h | Get-AdvancedSetting -Name 'Security.PasswordMaxDays' -ErrorAction Stop |
-                           Where-Object { $null -ne $_ -and $null -ne $_.Value })
-            if ($pwSetting.Count -ne 1) {
-                Add-Result 'HostHealth' $h.Name 'PasswordExpirationPolicy' 'INFO' 'Security.PasswordMaxDays not reported by this host'
+        # local password may reach, which is what vCenter does expose. It came
+        # with the view in Config.Option, so there is no per-host settings query.
+        $pwRaw = Get-HostOptionValue -HostView $hv -Name 'Security.PasswordMaxDays'
+        if ($null -eq $pwRaw) {
+            Add-Result 'HostHealth' $hName 'PasswordExpirationPolicy' 'INFO' 'Security.PasswordMaxDays not reported by this host'
+        } else {
+            $pwMaxDays = [int]$pwRaw
+            $pwNote    = "root's own remaining days aren't exposed by the vCenter API; that needs SSH and 'chage -l root'"
+            if ($pwMaxDays -ge 99999) {
+                # 99999 is VMware's shipped default and its "never" sentinel,
+                # not an age anyone chose - worth calling out as such.
+                Add-Result 'HostHealth' $hName 'PasswordExpirationPolicy' 'WARN' "Security.PasswordMaxDays = $pwMaxDays - VMware's default, meaning local account passwords including root never expire ($pwNote)"
+            } elseif ($pwMaxDays -gt $PasswordMaxDaysWarn) {
+                Add-Result 'HostHealth' $hName 'PasswordExpirationPolicy' 'WARN' "Security.PasswordMaxDays = $pwMaxDays days, above the $PasswordMaxDaysWarn-day threshold ($pwNote)"
             } else {
-                $pwMaxDays = [int]$pwSetting[0].Value
-                $pwNote    = "root's own remaining days aren't exposed by the vCenter API; that needs SSH and 'chage -l root'"
-                if ($pwMaxDays -ge 99999) {
-                    # 99999 is VMware's shipped default and its "never" sentinel,
-                    # not an age anyone chose - worth calling out as such.
-                    Add-Result 'HostHealth' $h.Name 'PasswordExpirationPolicy' 'WARN' "Security.PasswordMaxDays = $pwMaxDays - VMware's default, meaning local account passwords including root never expire ($pwNote)"
-                } elseif ($pwMaxDays -gt $PasswordMaxDaysWarn) {
-                    Add-Result 'HostHealth' $h.Name 'PasswordExpirationPolicy' 'WARN' "Security.PasswordMaxDays = $pwMaxDays days, above the $PasswordMaxDaysWarn-day threshold ($pwNote)"
-                } else {
-                    Add-Result 'HostHealth' $h.Name 'PasswordExpirationPolicy' 'PASS' "Security.PasswordMaxDays = $pwMaxDays days ($pwNote)"
-                }
+                Add-Result 'HostHealth' $hName 'PasswordExpirationPolicy' 'PASS' "Security.PasswordMaxDays = $pwMaxDays days ($pwNote)"
             }
-        } catch {
-            Add-Result 'HostHealth' $h.Name 'PasswordExpirationPolicy' 'INFO' "Could not read Security.PasswordMaxDays: $($_.Exception.Message)"
         }
 
         # Lockdown mode - Disabled means direct root/local logins to the host
         # bypass vCenter entirely, reducing auditability. Security hardening
         # guides recommend Normal or Strict for production hosts.
-        $lockdown = $h.ExtensionData.Config.LockdownMode
-        switch ($lockdown) {
-            'lockdownDisabled' { Add-Result 'HostHealth' $h.Name 'LockdownMode' 'WARN' 'Disabled - direct root/local logins to this host bypass vCenter, reducing auditability; consider Normal or Strict lockdown' }
-            'lockdownNormal'   { Add-Result 'HostHealth' $h.Name 'LockdownMode' 'PASS' 'Normal' }
-            'lockdownStrict'   { Add-Result 'HostHealth' $h.Name 'LockdownMode' 'PASS' 'Strict' }
-            default            { Add-Result 'HostHealth' $h.Name 'LockdownMode' 'INFO' "Could not read lockdown mode ($lockdown)" }
+        $lockdown = $hv.Config.LockdownMode
+        switch ([string]$lockdown) {
+            'lockdownDisabled' { Add-Result 'HostHealth' $hName 'LockdownMode' 'WARN' 'Disabled - direct root/local logins to this host bypass vCenter, reducing auditability; consider Normal or Strict lockdown' }
+            'lockdownNormal'   { Add-Result 'HostHealth' $hName 'LockdownMode' 'PASS' 'Normal' }
+            'lockdownStrict'   { Add-Result 'HostHealth' $hName 'LockdownMode' 'PASS' 'Strict' }
+            default            { Add-Result 'HostHealth' $hName 'LockdownMode' 'INFO' "Could not read lockdown mode ($lockdown)" }
         }
 
         # SSH (TSM-SSH) service - often enabled temporarily for troubleshooting
         # and then forgotten; left running long-term it's extra attack surface.
         $sshSvc = $hostServices | Where-Object { $_.Key -eq 'TSM-SSH' }
         if (-not $sshSvc) {
-            Add-Result 'HostHealth' $h.Name 'SSHEnabled' 'INFO' 'Could not read SSH (TSM-SSH) service state'
+            Add-Result 'HostHealth' $hName 'SSHEnabled' 'INFO' 'Could not read SSH (TSM-SSH) service state'
         } elseif ($sshSvc.Running) {
-            Add-Result 'HostHealth' $h.Name 'SSHEnabled' 'WARN' 'SSH service is running - confirm this is intentional; leaving it enabled long-term increases attack surface'
+            Add-Result 'HostHealth' $hName 'SSHEnabled' 'WARN' 'SSH service is running - confirm this is intentional; leaving it enabled long-term increases attack surface'
         } else {
-            Add-Result 'HostHealth' $h.Name 'SSHEnabled' 'PASS' 'SSH service not running'
+            Add-Result 'HostHealth' $hName 'SSHEnabled' 'PASS' 'SSH service not running'
         }
     }
     #endregion
 
     #region --- 2. VM compliance ---------------------------------------------
     Write-Host "`n=== VM Compliance ===" -ForegroundColor Cyan
-    $vms = Get-VM -Server $connections
 
-    # Pre-fetch snapshots, CD drives and floppy drives for ALL VMs in one
-    # round-trip each, rather than calling Get-Snapshot / Get-CDDrive /
-    # Get-FloppyDrive once per VM inside the loop. On large or multi-vCenter
-    # inventories this is the single biggest speed-up. Key by .Uid
-    # (server-qualified) so VMs from different vCenters with the same internal
-    # MoRef Id don't collide.
-    $snapsByVm  = @{}
-    $cdByVm     = @{}
-    $floppyByVm = @{}
-    # Highest hardware version each host/cluster supports, filled in on first
-    # use by Get-MaxHardwareVersion so only hosts with an out-of-date VM on
-    # them cost an extra round-trip.
-    $maxHwCache = @{}
-    if ($vms) {
-        Write-Host "  Pre-fetching snapshots and media for $(@($vms).Count) VM(s)..." -ForegroundColor DarkGray
-        foreach ($s in (Get-Snapshot -VM $vms)) {
-            $key = $s.VM.Uid
+    # One Get-View for every VM across every connection, carrying everything
+    # the VM checks need - including the devices that used to come from a
+    # Get-CDDrive and a Get-FloppyDrive, and the snapshot tree.
+    $vmProps = @(
+        'Name', 'Runtime.ConnectionState', 'Runtime.ConsolidationNeeded',
+        'Runtime.PowerState', 'Runtime.Host',
+        'Config.Version', 'Config.GuestFullName', 'Config.Hardware.Device',
+        'Guest.ToolsStatus', 'Guest.Disk', 'Snapshot'
+    )
+    $vmViews = New-Object System.Collections.Generic.List[object]
+    $pcliVms = New-Object System.Collections.Generic.List[object]
+    foreach ($conn in $connections) {
+        foreach ($vv in @(Get-View -ViewType VirtualMachine -Property $vmProps -Server $conn)) {
+            $vmViews.Add($vv)
+        }
+        foreach ($pv in @(Get-VM -Server $conn)) { $pcliVms.Add($pv) }
+    }
+
+    # Snapshot SIZE is the one thing the view layout doesn't hand over
+    # directly, and it is the part that tells you whether a snapshot is
+    # urgent, so it still comes from one bulk Get-Snapshot for the whole
+    # inventory - O(1) calls, not one per VM. Everything else about a
+    # snapshot (name, age) comes from the view.
+    $snapsByVm  = @{}   # VM MoRef -> list of PowerCLI snapshot objects
+    $maxHwCache = @{}   # compute resource MoRef -> highest supported vmx-NN
+    if ($pcliVms.Count -gt 0) {
+        Write-Host "  Pre-fetching snapshot sizes for $($pcliVms.Count) VM(s)..." -ForegroundColor DarkGray
+        foreach ($sn in @(Get-Snapshot -VM $pcliVms)) {
+            $key = "$($sn.VM.ExtensionData.MoRef)"
             if (-not $snapsByVm.ContainsKey($key)) { $snapsByVm[$key] = [System.Collections.Generic.List[object]]::new() }
-            $snapsByVm[$key].Add($s)
-        }
-        foreach ($c in (Get-CDDrive -VM $vms)) {
-            $key = $c.Parent.Uid
-            if (-not $cdByVm.ContainsKey($key)) { $cdByVm[$key] = [System.Collections.Generic.List[object]]::new() }
-            $cdByVm[$key].Add($c)
-        }
-        foreach ($fd in (Get-FloppyDrive -VM $vms)) {
-            $key = $fd.Parent.Uid
-            if (-not $floppyByVm.ContainsKey($key)) { $floppyByVm[$key] = [System.Collections.Generic.List[object]]::new() }
-            $floppyByVm[$key].Add($fd)
+            $snapsByVm[$key].Add($sn)
         }
     }
 
-    foreach ($vm in $vms) {
-        # Runtime.ConnectionState / Runtime.ConsolidationNeeded aren't always
-        # populated on the cached view Get-VM hands back (PowerCLI retrieves a
-        # filtered property set), which reads as $null rather than as an error.
-        # Refresh just those two properties when either is missing, so only the
-        # affected VMs pay a round-trip.
-        $connState     = $vm.ExtensionData.Runtime.ConnectionState
-        $consolidation = $vm.ExtensionData.Runtime.ConsolidationNeeded
-        if ($null -eq $connState -or $null -eq $consolidation) {
-            try {
-                $vm.ExtensionData.UpdateViewData('Runtime.ConnectionState', 'Runtime.ConsolidationNeeded')
-                $connState     = $vm.ExtensionData.Runtime.ConnectionState
-                $consolidation = $vm.ExtensionData.Runtime.ConsolidationNeeded
-            } catch {
-                # Deliberately swallowed: leave both $null so the checks below
-                # report INFO rather than guessing. A VM whose properties can't
-                # be refreshed is not itself a finding, so this goes to the
-                # verbose stream instead of the report. (Write-Error is not an
-                # option here - $ErrorActionPreference is 'Stop', so it would
-                # terminate the run for a condition that is already handled.)
-                Write-Verbose "Could not refresh runtime properties for '$($vm.Name)': $($_.Exception.Message)"
-            }
-        }
+    foreach ($vv in $vmViews) {
+        $vmName     = $vv.Name
+        $powerState = [string]$vv.Runtime.PowerState
+
+        # Runtime.ConnectionState / ConsolidationNeeded are requested above, so
+        # they arrive populated. If vCenter still returns nothing, that is
+        # reported as INFO rather than guessed at - a property that could not
+        # be read is not a failing VM.
+        $connState     = $vv.Runtime.ConnectionState
+        $consolidation = $vv.Runtime.ConsolidationNeeded
 
         # Connection state - orphaned/inaccessible/invalid is vCenter's
         # inventory losing track of the VM (the "question mark" icon in the
@@ -937,13 +964,13 @@ try {
         # failure, so a healthy VM is never flagged just because vCenter didn't
         # hand back the property.
         switch ([string]$connState) {
-            'connected'    { Add-Result 'VMCompliance' $vm.Name 'ConnectionState' 'PASS' "Connected to vCenter ($($vm.PowerState))" }
-            'disconnected' { Add-Result 'VMCompliance' $vm.Name 'ConnectionState' 'WARN' 'Disconnected - the host running this VM is currently unreachable from vCenter' }
-            'orphaned'     { Add-Result 'VMCompliance' $vm.Name 'ConnectionState' 'FAIL' 'Orphaned - vCenter has an inventory entry but the host does not report this VM (shows as a question mark in the vSphere Client)' }
-            'inaccessible' { Add-Result 'VMCompliance' $vm.Name 'ConnectionState' 'FAIL' 'Inaccessible - the VM config file (.vmx) cannot be read, usually a datastore or storage problem' }
-            'invalid'      { Add-Result 'VMCompliance' $vm.Name 'ConnectionState' 'FAIL' 'Invalid - vCenter considers this VM unusable, usually a corrupt or unreadable .vmx' }
-            ''             { Add-Result 'VMCompliance' $vm.Name 'ConnectionState' 'INFO' "Connection state not reported by vCenter for this VM; VM is $($vm.PowerState)" }
-            default        { Add-Result 'VMCompliance' $vm.Name 'ConnectionState' 'INFO' "Unrecognized connection state '$connState'; VM is $($vm.PowerState)" }
+            'connected'    { Add-Result 'VMCompliance' $vmName 'ConnectionState' 'PASS' "Connected to vCenter ($powerState)" }
+            'disconnected' { Add-Result 'VMCompliance' $vmName 'ConnectionState' 'WARN' 'Disconnected - the host running this VM is currently unreachable from vCenter' }
+            'orphaned'     { Add-Result 'VMCompliance' $vmName 'ConnectionState' 'FAIL' 'Orphaned - vCenter has an inventory entry but the host does not report this VM (shows as a question mark in the vSphere Client)' }
+            'inaccessible' { Add-Result 'VMCompliance' $vmName 'ConnectionState' 'FAIL' 'Inaccessible - the VM config file (.vmx) cannot be read, usually a datastore or storage problem' }
+            'invalid'      { Add-Result 'VMCompliance' $vmName 'ConnectionState' 'FAIL' 'Invalid - vCenter considers this VM unusable, usually a corrupt or unreadable .vmx' }
+            ''             { Add-Result 'VMCompliance' $vmName 'ConnectionState' 'INFO' "Connection state not reported by vCenter for this VM; VM is $powerState" }
+            default        { Add-Result 'VMCompliance' $vmName 'ConnectionState' 'INFO' "Unrecognized connection state '$connState'; VM is $powerState" }
         }
 
         # Disk consolidation needed - leftover snapshot delta disks, often
@@ -952,52 +979,58 @@ try {
         # $null (property unavailable) is distinct from $false here: reporting
         # it as PASS would silently claim a clean result that was never checked.
         if ($null -eq $consolidation) {
-            Add-Result 'VMCompliance' $vm.Name 'DiskConsolidation' 'INFO' 'Consolidation state not reported by vCenter for this VM'
+            Add-Result 'VMCompliance' $vmName 'DiskConsolidation' 'INFO' 'Consolidation state not reported by vCenter for this VM'
         } elseif ($consolidation) {
-            Add-Result 'VMCompliance' $vm.Name 'DiskConsolidation' 'WARN' 'Disk consolidation needed - leftover snapshot delta disk(s) present; consolidate from the vSphere Client (Snapshots > Consolidate)'
+            Add-Result 'VMCompliance' $vmName 'DiskConsolidation' 'WARN' 'Disk consolidation needed - leftover snapshot delta disk(s) present; consolidate from the vSphere Client (Snapshots > Consolidate)'
         } else {
-            Add-Result 'VMCompliance' $vm.Name 'DiskConsolidation' 'PASS' 'No consolidation needed'
+            Add-Result 'VMCompliance' $vmName 'DiskConsolidation' 'PASS' 'No consolidation needed'
         }
 
         # VMware Tools status (only meaningful when powered on)
-        if ($vm.PowerState -eq 'PoweredOn') {
-            $toolsStatus = $vm.ExtensionData.Guest.ToolsStatus
+        if ($powerState -eq 'poweredOn') {
+            $toolsStatus = [string]$vv.Guest.ToolsStatus
             switch ($toolsStatus) {
-                'toolsOk'        { Add-Result 'VMCompliance' $vm.Name 'VMwareTools' 'PASS' 'toolsOk' }
-                'toolsOld'       { Add-Result 'VMCompliance' $vm.Name 'VMwareTools' 'WARN' 'Tools out of date' }
-                'toolsNotRunning'{ Add-Result 'VMCompliance' $vm.Name 'VMwareTools' 'WARN' 'Tools not running' }
-                'toolsNotInstalled'{ Add-Result 'VMCompliance' $vm.Name 'VMwareTools' 'FAIL' 'Tools not installed' }
-                default          { Add-Result 'VMCompliance' $vm.Name 'VMwareTools' 'INFO' "$toolsStatus" }
+                'toolsOk'          { Add-Result 'VMCompliance' $vmName 'VMwareTools' 'PASS' 'toolsOk' }
+                'toolsOld'         { Add-Result 'VMCompliance' $vmName 'VMwareTools' 'WARN' 'Tools out of date' }
+                'toolsNotRunning'  { Add-Result 'VMCompliance' $vmName 'VMwareTools' 'WARN' 'Tools not running' }
+                'toolsNotInstalled'{ Add-Result 'VMCompliance' $vmName 'VMwareTools' 'FAIL' 'Tools not installed' }
+                default            { Add-Result 'VMCompliance' $vmName 'VMwareTools' 'INFO' "$toolsStatus" }
             }
 
-            # OS system drive free space (C:\ on Windows, / on Linux).
-            # Guest disk data is only populated when VMware Tools is running.
-            $guestDisks = $vm.ExtensionData.Guest.Disk
-            if ($guestDisks) {
+            # Guest disk free space. Reported as a PERCENTAGE of each volume
+            # rather than an absolute GB figure: 20GB free is comfortable on a
+            # 1TB data disk and nearly full on a 40GB system disk, so a single
+            # GB threshold either cried wolf on big disks or stayed silent on
+            # small ones.
+            $guestDisks = @($vv.Guest.Disk)
+            if ($guestDisks.Count -gt 0) {
                 $osDrive = $guestDisks | Where-Object { $_.DiskPath -eq 'C:\' -or $_.DiskPath -eq '/' } | Select-Object -First 1
-                if ($osDrive) {
+                if ($osDrive -and $osDrive.Capacity -gt 0) {
+                    $freePct = [math]::Round(($osDrive.FreeSpace / $osDrive.Capacity) * 100, 1)
                     $freeGB  = [math]::Round($osDrive.FreeSpace / 1GB, 1)
                     $totalGB = [math]::Round($osDrive.Capacity / 1GB, 1)
-                    $detail  = "$($osDrive.DiskPath) ${freeGB}GB free of ${totalGB}GB"
-                    if ($freeGB -lt $OSDriveFreeWarnGB) {
-                        Add-Result 'VMCompliance' $vm.Name 'OSDriveFree' 'WARN' "$detail (< ${OSDriveFreeWarnGB}GB)"
+                    $detail  = "$($osDrive.DiskPath) $freePct% free (${freeGB}GB of ${totalGB}GB)"
+                    if ($freePct -lt $OSDriveFreeWarnPercent) {
+                        Add-Result 'VMCompliance' $vmName 'OSDriveFree' 'WARN' "$detail (< $OSDriveFreeWarnPercent%)"
                     } else {
-                        Add-Result 'VMCompliance' $vm.Name 'OSDriveFree' 'PASS' $detail
+                        Add-Result 'VMCompliance' $vmName 'OSDriveFree' 'PASS' $detail
                     }
                 } else {
-                    Add-Result 'VMCompliance' $vm.Name 'OSDriveFree' 'INFO' 'No C:\ or / drive reported by Tools'
+                    Add-Result 'VMCompliance' $vmName 'OSDriveFree' 'INFO' 'No C:\ or / drive reported by Tools'
                 }
 
                 # All other guest drives (data/secondary volumes) below threshold.
                 $osPath = if ($osDrive) { $osDrive.DiskPath } else { $null }
                 foreach ($disk in ($guestDisks | Where-Object { $_.DiskPath -ne $osPath })) {
+                    if ($disk.Capacity -le 0) { continue }
+                    $freePct = [math]::Round(($disk.FreeSpace / $disk.Capacity) * 100, 1)
                     $freeGB  = [math]::Round($disk.FreeSpace / 1GB, 1)
                     $totalGB = [math]::Round($disk.Capacity / 1GB, 1)
-                    $detail  = "$($disk.DiskPath) ${freeGB}GB free of ${totalGB}GB"
-                    if ($freeGB -lt $DataDriveFreeWarnGB) {
-                        Add-Result 'VMCompliance' $vm.Name 'DataDriveFree' 'WARN' "$detail (< ${DataDriveFreeWarnGB}GB)"
+                    $detail  = "$($disk.DiskPath) $freePct% free (${freeGB}GB of ${totalGB}GB)"
+                    if ($freePct -lt $DataDriveFreeWarnPercent) {
+                        Add-Result 'VMCompliance' $vmName 'DataDriveFree' 'WARN' "$detail (< $DataDriveFreeWarnPercent%)"
                     } else {
-                        Add-Result 'VMCompliance' $vm.Name 'DataDriveFree' 'PASS' $detail
+                        Add-Result 'VMCompliance' $vmName 'DataDriveFree' 'PASS' $detail
                     }
                 }
             }
@@ -1011,14 +1044,24 @@ try {
         # PowerCLI has reported this property as both 'vmx-19' and a bare '19'
         # across releases, so accept either, and report a value matching neither
         # as INFO rather than letting it fall through to PASS unexamined.
-        $hwVersion = $vm.HardwareVersion
+        $hwVersion = $vv.Config.Version
         $hwNum = 0
         if ($hwVersion -match '(?:vmx-)?(\d+)$') { $hwNum = [int]$Matches[1] }
         if ($hwNum -le 0) {
-            Add-Result 'VMCompliance' $vm.Name 'HardwareVersion' 'INFO' "Could not parse hardware version '$hwVersion'"
+            Add-Result 'VMCompliance' $vmName 'HardwareVersion' 'INFO' "Could not parse hardware version '$hwVersion'"
         } elseif ($hwNum -lt $HardwareVersionWarnNum) {
-            $maxHw = Get-MaxHardwareVersion -VMHost $vm.VMHost -Cache $maxHwCache
-            $guestOs = $vm.ExtensionData.Config.GuestFullName
+            # Resolve the VM's host -> compute resource -> EnvironmentBrowser
+            # from the prefetched maps, and cache on the COMPUTE RESOURCE so a
+            # cluster is asked once, not once per host and not once per VM.
+            $maxHw = $null
+            $vmHostView = if ($vv.Runtime.Host) { $hostByMoRef["$($vv.Runtime.Host)"] } else { $null }
+            if ($vmHostView -and $vmHostView.Parent) {
+                $crKey = "$($vmHostView.Parent)"
+                $maxHw = Get-MaxHardwareVersion -ComputeResourceMoRef $crKey `
+                                                -EnvironmentBrowser $envBrowserByCr[$crKey] `
+                                                -Cache $maxHwCache
+            }
+            $guestOs = $vv.Config.GuestFullName
             $guestClause = if ($guestOs) {
                 "Confirm '$guestOs' is supported on the target version"
             } else {
@@ -1032,47 +1075,63 @@ try {
             } else {
                 "Host/cluster supports up to vmx-$maxHw."
             }
-            Add-Result 'VMCompliance' $vm.Name 'HardwareVersion' 'WARN' "$hwVersion is below the vmx-$HardwareVersionWarnNum baseline. $advice $guestClause before upgrading; it requires a power-off and cannot be rolled back."
+            Add-Result 'VMCompliance' $vmName 'HardwareVersion' 'WARN' "$hwVersion is below the vmx-$HardwareVersionWarnNum baseline. $advice $guestClause before upgrading; it requires a power-off and cannot be rolled back."
         } else {
-            Add-Result 'VMCompliance' $vm.Name 'HardwareVersion' 'PASS' "$hwVersion (at or above the vmx-$HardwareVersionWarnNum baseline)"
+            Add-Result 'VMCompliance' $vmName 'HardwareVersion' 'PASS' "$hwVersion (at or above the vmx-$HardwareVersionWarnNum baseline)"
         }
+
+        # Virtual hardware came with the view, so CD and floppy drives are read
+        # straight off Config.Hardware.Device instead of a Get-CDDrive and a
+        # Get-FloppyDrive per inventory.
+        $devices = @($vv.Config.Hardware.Device)
 
         # Mounted ISO / connected CD-ROM (blocks vMotion, often left behind).
         # Only a connected drive (or one set to connect at power-on) matters: a
-        # stale IsoPath on a disconnected drive blocks nothing, and flagging it
-        # buries the report in noise anywhere VMs are deployed from ISO. Same
-        # test as the floppy check below.
-        $mounted = $cdByVm[$vm.Uid] | Where-Object {
-            ($_.IsoPath -or $_.HostDevice -or $_.RemoteDevice) -and
-            ($_.ConnectionState.Connected -or $_.ConnectionState.StartConnected)
-        }
-        if ($mounted) {
-            $what = ($mounted | ForEach-Object { if ($_.IsoPath) { $_.IsoPath } else { 'host/remote device' } }) -join ','
-            Add-Result 'VMCompliance' $vm.Name 'MountedMedia' 'WARN' "Connected media: $what"
+        # stale ISO path on a disconnected drive blocks nothing, and flagging it
+        # buries the report in noise anywhere VMs are deployed from ISO.
+        $cdDevices = @($devices | Where-Object { $_ -is [VMware.Vim.VirtualCdrom] })
+        $mounted   = @($cdDevices | Where-Object {
+            $_.Connectable -and ($_.Connectable.Connected -or $_.Connectable.StartConnected)
+        })
+        if ($mounted.Count -gt 0) {
+            $what = ($mounted | ForEach-Object {
+                if ($_.Backing -and $_.Backing.FileName) { $_.Backing.FileName } else { 'host/remote device' }
+            }) -join ','
+            Add-Result 'VMCompliance' $vmName 'MountedMedia' 'WARN' "Connected media: $what"
         }
 
         # Floppy drives - legacy hardware. A connected floppy blocks vMotion;
         # any floppy at all is usually unnecessary on a modern VM.
-        $floppies = $floppyByVm[$vm.Uid]
-        if ($floppies) {
-            $connected = $floppies | Where-Object { $_.ConnectionState.Connected -or $_.ConnectionState.StartConnected }
-            if ($connected) {
-                $what = ($connected | ForEach-Object { if ($_.FloppyImagePath) { $_.FloppyImagePath } else { 'device' } }) -join ','
-                Add-Result 'VMCompliance' $vm.Name 'FloppyDrive' 'WARN' "Connected floppy drive ($what) - disconnect/remove (legacy, blocks vMotion)"
+        $floppies = @($devices | Where-Object { $_ -is [VMware.Vim.VirtualFloppy] })
+        if ($floppies.Count -gt 0) {
+            $connected = @($floppies | Where-Object {
+                $_.Connectable -and ($_.Connectable.Connected -or $_.Connectable.StartConnected)
+            })
+            if ($connected.Count -gt 0) {
+                $what = ($connected | ForEach-Object {
+                    if ($_.Backing -and $_.Backing.FileName) { $_.Backing.FileName } else { 'device' }
+                }) -join ','
+                Add-Result 'VMCompliance' $vmName 'FloppyDrive' 'WARN' "Connected floppy drive ($what) - disconnect/remove (legacy, blocks vMotion)"
             } else {
-                Add-Result 'VMCompliance' $vm.Name 'FloppyDrive' 'INFO' "Floppy drive present but disconnected - consider removing (legacy device)"
+                Add-Result 'VMCompliance' $vmName 'FloppyDrive' 'INFO' "Floppy drive present but disconnected - consider removing (legacy device)"
             }
         }
 
-        # Snapshot age
-        $snaps = $snapsByVm[$vm.Uid]
-        foreach ($s in $snaps) {
-            $ageDays = [math]::Round((New-TimeSpan -Start $s.Created -End (Get-Date)).TotalDays, 1)
-            $sizeGB  = [math]::Round($s.SizeGB, 1)
+        # Snapshot age, from the view's snapshot tree; size from the bulk
+        # Get-Snapshot above, matched by name.
+        $snapSizes = @{}
+        foreach ($sn in @($snapsByVm["$($vv.MoRef)"])) {
+            if ($sn) { $snapSizes[[string]$sn.Name] = $sn.SizeGB }
+        }
+        foreach ($node in (Get-SnapshotNode -Nodes $vv.Snapshot.RootSnapshotList)) {
+            $ageDays = [math]::Round((New-TimeSpan -Start $node.CreateTime -End (Get-Date)).TotalDays, 1)
+            $sizeTxt = if ($snapSizes.ContainsKey([string]$node.Name)) {
+                ", $([math]::Round($snapSizes[[string]$node.Name], 1))GB"
+            } else { '' }
             if ($ageDays -ge $SnapshotAgeWarningDays) {
-                Add-Result 'VMCompliance' $vm.Name 'Snapshot' 'WARN' "'$($s.Name)' age ${ageDays}d, ${sizeGB}GB"
+                Add-Result 'VMCompliance' $vmName 'Snapshot' 'WARN' "'$($node.Name)' age ${ageDays}d$sizeTxt"
             } else {
-                Add-Result 'VMCompliance' $vm.Name 'Snapshot' 'INFO' "'$($s.Name)' age ${ageDays}d, ${sizeGB}GB"
+                Add-Result 'VMCompliance' $vmName 'Snapshot' 'INFO' "'$($node.Name)' age ${ageDays}d$sizeTxt"
             }
         }
     }
@@ -1081,115 +1140,119 @@ try {
     #region --- 3. Capacity ---------------------------------------------------
     Write-Host "`n=== Capacity ===" -ForegroundColor Cyan
 
-    # Datastore free space
-    foreach ($ds in (Get-Datastore -Server $connections)) {
-        if ($ds.CapacityGB -le 0) { continue }
-        $freePct = [math]::Round(($ds.FreeSpaceGB / $ds.CapacityGB) * 100, 1)
-        $detail  = "$freePct% free ($([math]::Round($ds.FreeSpaceGB))GB / $([math]::Round($ds.CapacityGB))GB)"
+    # Datastore free space, from the datastore views already prefetched.
+    foreach ($dv in $dsEntries) {
+        if ($null -eq $dv.Summary -or [double]$dv.Summary.Capacity -le 0) { continue }
+        $capGB  = [double]$dv.Summary.Capacity / 1GB
+        $freeGB = [double]$dv.Summary.FreeSpace / 1GB
+        $freePct = [math]::Round(($freeGB / $capGB) * 100, 1)
+        $detail  = "$freePct% free ($([math]::Round($freeGB))GB / $([math]::Round($capGB))GB)"
         if ($freePct -lt $DatastoreFreeCritPercent) {
-            Add-Result 'Capacity' $ds.Name 'DatastoreFree' 'FAIL' $detail
+            Add-Result 'Capacity' $dv.Name 'DatastoreFree' 'FAIL' $detail
         } elseif ($freePct -lt $DatastoreFreeWarnPercent) {
-            Add-Result 'Capacity' $ds.Name 'DatastoreFree' 'WARN' $detail
+            Add-Result 'Capacity' $dv.Name 'DatastoreFree' 'WARN' $detail
         } else {
-            Add-Result 'Capacity' $ds.Name 'DatastoreFree' 'PASS' $detail
+            Add-Result 'Capacity' $dv.Name 'DatastoreFree' 'PASS' $detail
         }
     }
 
-    # Cluster CPU / RAM utilization
-    foreach ($cl in (Get-Cluster -Server $connections)) {
-        $hostsInCl = $cl | Get-VMHost
-        $totalCpuMhz = ($hostsInCl | Measure-Object -Property CpuTotalMhz -Sum).Sum
-        $usedCpuMhz  = ($hostsInCl | Measure-Object -Property CpuUsageMhz -Sum).Sum
-        # The GB properties are the current ones on VMHost; the MB pair is
-        # legacy and, where it is absent, Measure-Object returns a null Sum and
-        # the ClusterRAM row silently vanishes from the report instead of erroring.
-        $totalMemGB  = ($hostsInCl | Measure-Object -Property MemoryTotalGB -Sum).Sum
-        $usedMemGB   = ($hostsInCl | Measure-Object -Property MemoryUsageGB -Sum).Sum
+    # Cluster CPU / RAM utilization, summed from the host views the cluster
+    # already points at - no Get-VMHost per cluster.
+    foreach ($cv in $clusterEntries) {
+        $clHosts = @(@($cv.Host) | ForEach-Object { $hostByMoRef["$_"] } | Where-Object { $_ })
+        $totalCpuMhz = 0.0; $usedCpuMhz = 0.0
+        $totalMemGB  = 0.0; $usedMemGB  = 0.0
+        foreach ($chv in $clHosts) {
+            $hw = $chv.Summary.Hardware
+            $qs = $chv.Summary.QuickStats
+            if ($hw) {
+                $totalCpuMhz += ([double]$hw.CpuMhz * [double]$hw.NumCpuCores)
+                $totalMemGB  += ([double]$hw.MemorySize / 1GB)
+            }
+            if ($qs) {
+                $usedCpuMhz += [double]$qs.OverallCpuUsage
+                # QuickStats reports memory usage in MB.
+                $usedMemGB  += ([double]$qs.OverallMemoryUsage / 1024)
+            }
+        }
 
         if ($totalCpuMhz -gt 0) {
             $cpuPct = [math]::Round(($usedCpuMhz / $totalCpuMhz) * 100, 1)
             $status = if ($cpuPct -ge $ClusterUsageWarnPercent) { 'WARN' } else { 'PASS' }
-            Add-Result 'Capacity' $cl.Name 'ClusterCPU' $status "$cpuPct% used"
+            Add-Result 'Capacity' $cv.Name 'ClusterCPU' $status "$cpuPct% used"
         }
         if ($totalMemGB -gt 0) {
             $memPct = [math]::Round(($usedMemGB / $totalMemGB) * 100, 1)
             $status = if ($memPct -ge $ClusterUsageWarnPercent) { 'WARN' } else { 'PASS' }
-            Add-Result 'Capacity' $cl.Name 'ClusterRAM' $status "$memPct% used"
+            Add-Result 'Capacity' $cv.Name 'ClusterRAM' $status "$memPct% used"
         }
     }
     #endregion
 
     #region --- 4. Cluster config --------------------------------------------
     Write-Host "`n=== Cluster Config ===" -ForegroundColor Cyan
-    foreach ($cl in (Get-Cluster -Server $connections)) {
+
+    foreach ($cv in $clusterEntries) {
+        $clName = $cv.Name
+        $dasCfg = $cv.Configuration.DasConfig
+        $drsCfg = $cv.Configuration.DrsConfig
+
         # HA
-        if ($cl.HAEnabled) {
-            Add-Result 'ClusterConfig' $cl.Name 'HA' 'PASS' 'High Availability enabled (restarts VMs on the surviving hosts if a host fails)'
+        if ($null -eq $dasCfg) {
+            Add-Result 'ClusterConfig' $clName 'HA' 'INFO' 'HA configuration not reported by vCenter for this cluster'
+        } elseif ($dasCfg.Enabled) {
+            Add-Result 'ClusterConfig' $clName 'HA' 'PASS' 'High Availability enabled (restarts VMs on the surviving hosts if a host fails)'
         } else {
-            Add-Result 'ClusterConfig' $cl.Name 'HA' 'WARN' 'High Availability disabled - if a host fails, the VMs it was running will stay down until someone restarts them by hand'
+            Add-Result 'ClusterConfig' $clName 'HA' 'WARN' 'High Availability disabled - if a host fails, the VMs it was running will stay down until someone restarts them by hand'
         }
 
-        # Admission control (only relevant when HA is on)
-        if ($cl.HAEnabled) {
-            # Same shape as EVC below: an unpopulated DasConfig must not be
-            # reported as "Disabled" - that is a finding we never established.
-            $dasConfig = $cl.ExtensionData.Configuration.DasConfig
-            if ($null -eq $dasConfig) {
-                Add-Result 'ClusterConfig' $cl.Name 'AdmissionControl' 'INFO' 'Admission control state not reported by vCenter for this cluster'
-            } elseif ($dasConfig.AdmissionControlEnabled) {
-                Add-Result 'ClusterConfig' $cl.Name 'AdmissionControl' 'PASS' 'Enabled - HA holds back enough spare capacity to restart the VMs from a failed host, and blocks power-ons that would eat into that reserve'
+        # Admission control (only relevant when HA is on). An unpopulated
+        # DasConfig must not be reported as "Disabled" - that is a finding we
+        # never established.
+        if ($null -eq $dasCfg) {
+            Add-Result 'ClusterConfig' $clName 'AdmissionControl' 'INFO' 'Admission control state not reported by vCenter for this cluster'
+        } elseif ($dasCfg.Enabled) {
+            if ($dasCfg.AdmissionControlEnabled) {
+                Add-Result 'ClusterConfig' $clName 'AdmissionControl' 'PASS' 'Enabled - HA holds back enough spare capacity to restart the VMs from a failed host, and blocks power-ons that would eat into that reserve'
             } else {
-                Add-Result 'ClusterConfig' $cl.Name 'AdmissionControl' 'WARN' 'Disabled - HA reserves no spare capacity, so VMs from a failed host may fail to restart if the remaining hosts are already committed'
+                Add-Result 'ClusterConfig' $clName 'AdmissionControl' 'WARN' 'Disabled - HA reserves no spare capacity, so VMs from a failed host may fail to restart if the remaining hosts are already committed'
             }
         }
 
         # DRS
-        if ($cl.DrsEnabled) {
-            Add-Result 'ClusterConfig' $cl.Name 'DRS' 'PASS' "Distributed Resource Scheduler enabled, $($cl.DrsAutomationLevel) (balances VM load across hosts using vMotion)"
-            if ($cl.DrsAutomationLevel -ne 'FullyAutomated') {
-                Add-Result 'ClusterConfig' $cl.Name 'DRSAutomation' 'WARN' "DRS is set to $($cl.DrsAutomationLevel), not FullyAutomated - it only recommends migrations instead of performing them, so rebalancing waits on someone approving them"
+        if ($null -eq $drsCfg) {
+            Add-Result 'ClusterConfig' $clName 'DRS' 'INFO' 'DRS configuration not reported by vCenter for this cluster'
+        } elseif ($drsCfg.Enabled) {
+            $drsLevel = [string]$drsCfg.DefaultVmBehavior
+            Add-Result 'ClusterConfig' $clName 'DRS' 'PASS' "Distributed Resource Scheduler enabled, $drsLevel (balances VM load across hosts using vMotion)"
+            if ($drsLevel -ne 'fullyAutomated') {
+                Add-Result 'ClusterConfig' $clName 'DRSAutomation' 'WARN' "DRS is set to $drsLevel, not FullyAutomated - it only recommends migrations instead of performing them, so rebalancing waits on someone approving them"
             }
         } else {
-            Add-Result 'ClusterConfig' $cl.Name 'DRS' 'WARN' 'Distributed Resource Scheduler disabled - VM load is not balanced across hosts automatically'
+            Add-Result 'ClusterConfig' $clName 'DRS' 'WARN' 'Distributed Resource Scheduler disabled - VM load is not balanced across hosts automatically'
         }
 
-        # Host count / EVC sanity
-        $hostCount = @($cl | Get-VMHost).Count
-        if ($cl.HAEnabled -and $hostCount -lt 2) {
-            Add-Result 'ClusterConfig' $cl.Name 'HostCount' 'WARN' "Only $hostCount host(s) - HA cannot fail over"
+        # Host count - straight off the cluster view's own host list.
+        $hostCount = @($cv.Host).Count
+        if ($dasCfg -and $dasCfg.Enabled -and $hostCount -lt 2) {
+            Add-Result 'ClusterConfig' $clName 'HostCount' 'WARN' "Only $hostCount host(s) - HA cannot fail over"
         }
+
         # EVC masks host CPUs to a common baseline so a running VM can vMotion
         # between different CPU generations without the guest seeing the CPU
         # change mid-flight. We can't tell from vCenter alone whether this
         # cluster's hosts actually span multiple CPU generations, so flag
-        # "not configured" as WARN (consistent with the other cluster-config
-        # checks below, which also flag things that may be intentional) rather
-        # than staying silent - it's generally recommended as a hedge even for
-        # same-generation clusters, in case a differing host is added later.
-        # Read the PowerCLI property first - Get-Cluster exposes EVCMode
-        # directly and it doesn't depend on the view's Summary being
-        # populated - then fall back to the view, refreshing it once if it is
-        # absent. A $null used to mean "not configured" unconditionally, which
-        # reports EVERY cluster as unconfigured whenever the property simply
-        # wasn't retrieved: the same shape of bug as the VM connection state.
-        $evc = $cl.EVCMode
-        if (-not $evc) { $evc = $cl.ExtensionData.Summary.CurrentEVCModeKey }
-        if (-not $evc -and $null -eq $cl.ExtensionData.Summary) {
-            try {
-                $cl.ExtensionData.UpdateViewData('Summary')
-                $evc = $cl.ExtensionData.Summary.CurrentEVCModeKey
-            } catch {
-                Write-Verbose "Could not refresh Summary for cluster '$($cl.Name)': $($_.Exception.Message)"
-            }
-        }
-
-        if ($evc) {
-            Add-Result 'ClusterConfig' $cl.Name 'EVC' 'PASS' "Enhanced vMotion Compatibility enabled, baseline '$evc' (masks host CPUs to a common instruction set so running VMs can vMotion between hosts with different CPU generations)"
-        } elseif ($null -eq $cl.ExtensionData.Summary) {
-            # Not the same as "off": we never got an answer, so don't claim one.
-            Add-Result 'ClusterConfig' $cl.Name 'EVC' 'INFO' 'EVC mode not reported by vCenter for this cluster - could not determine whether it is enabled'
+        # "not configured" as WARN rather than staying silent - it's generally
+        # recommended as a hedge even for same-generation clusters.
+        # Summary is requested with the view above, so a $null here means
+        # vCenter genuinely didn't answer - which is not the same as "off",
+        # and must not be reported as one.
+        if ($null -eq $cv.Summary) {
+            Add-Result 'ClusterConfig' $clName 'EVC' 'INFO' 'EVC mode not reported by vCenter for this cluster - could not determine whether it is enabled'
+        } elseif ($cv.Summary.CurrentEVCModeKey) {
+            Add-Result 'ClusterConfig' $clName 'EVC' 'PASS' "Enhanced vMotion Compatibility enabled, baseline '$($cv.Summary.CurrentEVCModeKey)' (masks host CPUs to a common instruction set so running VMs can vMotion between hosts with different CPU generations)"
         } else {
-            Add-Result 'ClusterConfig' $cl.Name 'EVC' 'WARN' 'Enhanced vMotion Compatibility (masks host CPUs to a common instruction set so running VMs can vMotion between hosts with different CPU generations) is not configured - if hosts have mixed CPU generations, or a differing one is added later, vMotion may fail; consider enabling EVC as a hedge'
+            Add-Result 'ClusterConfig' $clName 'EVC' 'WARN' 'Enhanced vMotion Compatibility (masks host CPUs to a common instruction set so running VMs can vMotion between hosts with different CPU generations) is not configured - if hosts have mixed CPU generations, or a differing one is added later, vMotion may fail; consider enabling EVC as a hedge'
         }
     }
     #endregion
@@ -1287,7 +1350,7 @@ finally {
  .badge-WARN { background: var(--warn-bg); color: var(--warn); }
  .badge-FAIL { background: var(--crit-bg); color: var(--crit); }
  .badge-INFO { background: var(--info-bg); color: var(--info); }
- tr.hidden, h2.hidden, table.hidden { display: none; }
+ tr.hidden, h2.hidden, table.hidden, .sidebar li.hidden, .sidebar .toc-cat.hidden { display: none; }
  #emptyNote { color: var(--muted); font-style: italic; margin: 12px 0; display: none; }
  .b { font-size: 11px; font-weight: bold; padding: 0 5px; border-radius: 8px; margin-left: 4px; }
  .bFAIL { background: var(--crit-bg); color: var(--crit); }
@@ -1411,6 +1474,16 @@ $secRows
    var head = document.querySelector('[data-section="' + id + '"]');
    tbl.classList.toggle('hidden', vis === 0);
    if (head) head.classList.toggle('hidden', vis === 0);
+   // The sidebar entry follows its section. Under the default
+   // "Needs attention" filter that leaves the contents listing showing only
+   // what needs attention - INFO/PASS-only sections such as Uptime stay out
+   // of the way until you click INFO or PASS to bring them back.
+   var link = document.querySelector('.sidebar [data-jump="' + id + '"]');
+   if (link && link.parentElement) { link.parentElement.classList.toggle('hidden', vis === 0); }
+  });
+  // A category heading with nothing left under it goes too.
+  document.querySelectorAll('.sidebar .toc-cat').forEach(function(cat){
+   cat.classList.toggle('hidden', cat.querySelectorAll('li:not(.hidden)').length === 0);
   });
  }
  function apply(filter){

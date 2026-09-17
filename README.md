@@ -57,7 +57,7 @@ report showing those failures.
 The script checks:
 
 - **Host health** — connection state, NTP, syslog (both optionally compared against an expected baseline), uptime, datastore connectivity, FC/iSCSI storage path state (dead paths, even when a datastore still reads as accessible on its remaining paths), TLS certificate expiry (ESXi hosts and vCenter itself), local account password expiration policy (root included), ESXi build vs. vCenter build, lockdown mode, SSH service state
-- **VM compliance** — connection state (orphaned/inaccessible VMs), disk consolidation needed, VMware Tools, OS system drive free space (`C:\` / `/`), all other guest drives, VM hardware version, mounted ISOs/CD-ROMs, connected floppy drives, snapshot age
+- **VM compliance** — connection state (orphaned/inaccessible VMs), disk consolidation needed, VMware Tools, OS system drive free space (`C:\` / `/`, as a **percentage** of the volume), all other guest drives, VM hardware version, mounted ISOs/CD-ROMs, connected floppy drives, snapshot age
 - **Capacity** — datastore free space, cluster CPU/RAM utilization
 - **Cluster config** — HA, admission control, DRS, EVC
 
@@ -164,6 +164,13 @@ which also flag things that may be intentional) since enabling EVC is generally
 recommended even for same-generation clusters, as a hedge in case a differing host
 is added later.
 
+**Guest drive thresholds are percentages.** `-OSDriveFreeWarnPercent` (default
+15) and `-DataDriveFreeWarnPercent` (default 10) flag a volume by how full it
+is, not by absolute GB. 20GB free is comfortable on a 1TB data disk and nearly
+full on a 40GB system disk, so a single GB threshold either cried wolf on large
+volumes or stayed silent on small ones. The detail still shows the GB figures
+for context: `C:\ 12.3% free (9.8GB of 80GB)`.
+
 **Local account password expiration.** Reads `Security.PasswordMaxDays`, the
 host-wide maximum age a local password may reach. `WARN` at `99999` — VMware's
 shipped default and its "never expires" sentinel rather than an age anyone chose
@@ -223,13 +230,18 @@ these silently consume growing datastore space.
 
 Findings are tagged `PASS` / `WARN` / `FAIL` / `INFO`. The script never modifies configuration.
 
-**Runtime** scales with total inventory, since checks run per-host and per-VM (each a round-trip to vCenter). Connecting to multiple vCenters adds their inventories together. Rough guide:
+**Runtime.** Inventory is read in **bulk**: one `Get-View` per object type per
+vCenter, rather than a cmdlet call per host, per LUN and per VM. A run against
+one vCenter makes a fixed handful of API calls whether it has 3 hosts or 300 —
+the work after that is local. The old shape cost roughly one call per host for
+services, NTP, syslog and advanced settings, plus **one per LUN** for path
+state, so a host with 40 LUNs alone was 45+ round-trips.
 
 | Inventory | Estimate |
 |-----------|----------|
-| ~25 VMs / 2-3 hosts | under a minute |
-| ~150 VMs | a few minutes |
-| 500+ VMs | 10+ minutes |
+| ~25 VMs / 2-3 hosts | seconds |
+| ~150 VMs | well under a minute |
+| 500+ VMs | a minute or two |
 
 Add ~10-30s for the initial PowerCLI module import. As long as `PASS`/`WARN` lines keep printing, it's working — not hung.
 
@@ -266,7 +278,7 @@ powershell.exe -Command "& { .\HealthCheck\Invoke-VMwareHealthCheck.ps1 -VCenter
 
 The HTML report uses a **dashboard-style layout** — a Dell-blue header bar, with the sidebar, table headers and links all drawn from that same blue, and status pill badges (`PASS`/`WARN`/`FAIL`/`INFO`), similar in feel to a Dell iDRAC or OpenManage console. Color-coded **stat tiles** at the top (Fail / Warn / Info / Pass counts) are clickable and double as the severity filter. The tiles and the filter buttons together **stay frozen at the top of the page** like a spreadsheet header row, so every count and filter stays reachable from anywhere in a long report instead of forcing a scroll back up — shown alongside the same **`Needs attention`, `FAIL`, `WARN`, `INFO`, `PASS`, `All`** filter buttons — the report opens pre-filtered to `FAIL` + `WARN` (what needs fixing), so you can drill straight to the problems instead of scrolling past everything that passed.
 
-Results are also broken into **per-check sections** (e.g. *VMware Tools*, *Hardware Version*, *Mounted ISOs*, *Snapshots*, *NTP*, *Datastore Free*), each in its own table. The left **sidebar** lists every section grouped by category, with `FAIL`/`WARN` badges marking where the problems are — the **whole row is the link**, name and badges alike. Check names are spaced out there (`Certificate Expiry`, not `CertificateExpiry`) so the narrow column wraps at word boundaries; section headings keep the raw name, matching the CSV. Severity filtering and section navigation work together: under a filter, sections with no matching rows are hidden automatically, and clicking a sidebar entry whose section is hidden reveals **just that section** — it does not drop the whole report back to `All`. (The CSV stays complete and unfiltered for trending; open it in Excel and use AutoFilter on the Status column for the same effect.)
+Results are also broken into **per-check sections** (e.g. *VMware Tools*, *Hardware Version*, *Mounted ISOs*, *Snapshots*, *NTP*, *Datastore Free*), each in its own table. The left **sidebar** lists every section grouped by category, with `FAIL`/`WARN` badges marking where the problems are — the **whole row is the link**, name and badges alike. Check names are spaced out there (`Certificate Expiry`, not `CertificateExpiry`) so the narrow column wraps at word boundaries; section headings keep the raw name, matching the CSV. Severity filtering and section navigation work together: under a filter, sections with no matching rows are hidden automatically — **and so are their sidebar entries**, so a report opened on `Needs attention` lists only what needs attention rather than every check that ran. `INFO` and `PASS`-only sections (host `Uptime`, for instance) stay out of the way until you click the `INFO` or `PASS` button to bring them back, so nothing reads as an alert that isn't one. Clicking a sidebar entry whose section is hidden reveals **just that section** — it does not drop the whole report back to `All`. (The CSV stays complete and unfiltered for trending; open it in Excel and use AutoFilter on the Status column for the same effect.)
 
 **Sample report** (fictional lab data):
 
