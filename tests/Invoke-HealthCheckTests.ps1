@@ -347,8 +347,8 @@ try {
     # control Disabled" from a $null is claiming an answer that was never
     # obtained - the same shape as the VM connection-state bug.
     $blindEvc = Get-ResultRow $r.Rows 'CL-BLIND' 'EVC'
-    Assert-That 'unreadable EVC state is INFO, not a false "not configured"' `
-        ($blindEvc.Count -eq 1 -and $blindEvc[0].Status -eq 'INFO') `
+    Assert-That 'unreadable EVC state says so, rather than "not configured"' `
+        ($blindEvc.Count -eq 1 -and $blindEvc[0].Status -eq 'INFO' -and $blindEvc[0].Detail -match 'not reported by vCenter') `
         "got: $($blindEvc.Status) - $($blindEvc.Detail)"
 
     $blindAc = Get-ResultRow $r.Rows 'CL-BLIND' 'AdmissionControl'
@@ -358,9 +358,11 @@ try {
 
     # ...but a cluster that genuinely has EVC off must still WARN, so the fix
     # above cannot have been made by simply never warning.
+    # EVC off is INFO, not a finding - but it must still say it is OFF, not
+    # that it could not be read, or the two cases have been conflated.
     $realNoEvc = Get-ResultRow $r.Rows 'CL-NOEVC' 'EVC'
-    Assert-That 'EVC genuinely off still WARNs' `
-        ($realNoEvc.Count -eq 1 -and $realNoEvc[0].Status -eq 'WARN') `
+    Assert-That 'EVC genuinely off is INFO and says it is not configured' `
+        ($realNoEvc.Count -eq 1 -and $realNoEvc[0].Status -eq 'INFO' -and $realNoEvc[0].Detail -match 'is not configured') `
         "got: $($realNoEvc.Status) - $($realNoEvc.Detail)"
 
     $realNoAc = Get-ResultRow $r.Rows 'CL-NOEVC' 'AdmissionControl'

@@ -152,33 +152,24 @@ does and what leaving it off costs you, rather than reporting a bare acronym:
   rebalancing waits on someone approving them.
 - **Host count** — `WARN` on a single-host cluster, where HA has nowhere to fail over.
 
-**EVC (Enhanced vMotion Compatibility).** `PASS` with the cluster's current EVC mode
-(e.g. `intel-broadwell`) if one is set, `WARN` if `Not configured`. EVC masks each
-host's CPU down to a common baseline instruction set so a running VM can vMotion
-between hosts with different CPU generations without the guest OS seeing the CPU
-change mid-flight — without it, migrating to a host with an older/different feature
-set can crash the guest or vMotion can refuse outright. The script can't tell from
-vCenter alone whether a cluster's hosts actually span multiple CPU generations, but
-`Not configured` is flagged `WARN` anyway (like the other cluster-config checks,
-which also flag things that may be intentional) since enabling EVC is generally
-recommended even for same-generation clusters, as a hedge in case a differing host
-is added later.
+**EVC (Enhanced vMotion Compatibility).** Reported as `INFO`, not a finding.
+`PASS` with the cluster's current mode (e.g. `intel-broadwell`) when one is set;
+`INFO` when it isn't. EVC masks each host's CPU down to a common baseline
+instruction set so a running VM can vMotion between hosts with different CPU
+generations without the guest OS seeing the CPU change mid-flight — without it,
+migrating to a host with an older/different feature set can crash the guest or
+vMotion can refuse outright.
 
-**Guest drive thresholds are percentages.** `-OSDriveFreeWarnPercent` (default
-15) and `-DataDriveFreeWarnPercent` (default 10) flag a volume by how full it
-is, not by absolute GB. 20GB free is comfortable on a 1TB data disk and nearly
-full on a 40GB system disk, so a single GB threshold either cried wolf on large
-volumes or stayed silent on small ones. The detail still shows the GB figures
-for context: `C:\ 12.3% free (9.8GB of 80GB)`.
+It stays out of the "needs attention" view on purpose: plenty of estates run no
+EVC by design, and the script can't tell from vCenter alone whether a cluster's
+hosts actually span CPU generations. Flagging it put an item on every cluster
+that nobody was ever going to action. It's still worth enabling as a hedge
+before you add a host of a differing generation — click `INFO` to see where it's
+off.
 
-**Local account password expiration.** Reads `Security.PasswordMaxDays`, the
-host-wide maximum age a local password may reach. `WARN` at `99999` — VMware's
-shipped default and its "never expires" sentinel rather than an age anyone chose
-— or above `-PasswordMaxDaysWarn` (default 365); `PASS` below that; `INFO` if the
-host doesn't report the setting. A specific account's actual days-until-expiry
-(root's included) isn't exposed by the vCenter API at all — that lives in the
-host's shadow file and needs SSH and `chage -l root` — so the detail says so
-rather than implying the report has checked it.
+A cluster whose EVC mode vCenter doesn't report is also `INFO`, with a
+different detail (`not reported by vCenter`), so "off" and "couldn't tell" are
+never conflated.
 
 **ESXi build vs. vCenter build.** VMware only supports ESXi hosts within roughly two
 major versions behind vCenter, and a host *newer* than vCenter is unsupported outright
