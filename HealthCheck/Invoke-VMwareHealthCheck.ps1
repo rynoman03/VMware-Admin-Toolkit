@@ -373,7 +373,11 @@ function Get-MaxHardwareVersion {
         [object]    $VMHost,
         [hashtable] $Cache
     )
-    if (-not $VMHost) { return $null }
+    # A VM's host reference can be a non-null object whose .Name is itself
+    # null or empty - e.g. an orphaned/inaccessible VM whose host relationship
+    # is broken - which $Cache.ContainsKey(...) throws on ("Value cannot be
+    # null. (Parameter 'key')") rather than returning $false. Guard both.
+    if (-not $VMHost -or [string]::IsNullOrEmpty($VMHost.Name)) { return $null }
     if ($Cache.ContainsKey($VMHost.Name)) { return $Cache[$VMHost.Name] }
 
     $max = $null
