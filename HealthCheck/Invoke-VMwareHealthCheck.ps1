@@ -141,7 +141,7 @@
       ~150 VMs .................. a few minutes
       500+ VMs .................. 10+ minutes
     Add ~10-30s for the initial PowerCLI module import. Multiple vCenters
-    add their inventories together. As long as [PASS]/[WARN] lines keep
+    add their inventories together. As long as [NORMAL]/[WARN] lines keep
     printing it is working, not hung.
 
     Output: every result shown on the console is also written to two
@@ -266,7 +266,7 @@ param(
 
 #region --- Setup -------------------------------------------------------------
 
-# Collected results. Each row: Category, Object, Check, Status (PASS/WARN/FAIL/INFO), Detail
+# Collected results. Each row: Category, Object, Check, Status (NORMAL/WARN/FAIL/INFO), Detail
 $script:Results = New-Object System.Collections.Generic.List[object]
 
 function Add-Result {
@@ -274,7 +274,7 @@ function Add-Result {
         [string] $Category,
         [string] $Object,
         [string] $Check,
-        [ValidateSet('PASS','WARN','FAIL','INFO')] [string] $Status,
+        [ValidateSet('NORMAL','WARN','FAIL','INFO')] [string] $Status,
         [string] $Detail
     )
     $script:Results.Add([pscustomobject]@{
@@ -285,7 +285,7 @@ function Add-Result {
         Detail   = $Detail
     })
     $color = switch ($Status) {
-        'PASS' { 'Green' }
+        'NORMAL' { 'Green' }
         'WARN' { 'Yellow' }
         'FAIL' { 'Red' }
         default { 'Gray' }
@@ -553,7 +553,7 @@ try {
             } elseif ($daysLeft -le $CertExpiryWarnDays) {
                 Add-Result 'HostHealth' $vc 'CertificateExpiry' 'WARN' "Expires in $daysLeft day(s) (NotAfter: $($vcCert.NotAfter))"
             } else {
-                Add-Result 'HostHealth' $vc 'CertificateExpiry' 'PASS' "Valid until $($vcCert.NotAfter) ($daysLeft days)"
+                Add-Result 'HostHealth' $vc 'CertificateExpiry' 'NORMAL' "Valid until $($vcCert.NotAfter) ($daysLeft days)"
             }
         } catch {
             Add-Result 'HostHealth' $vc 'CertificateExpiry' 'WARN' "Could not retrieve vCenter certificate: $($_.Exception.Message)"
@@ -627,7 +627,7 @@ try {
             Add-Result 'HostHealth' $hName 'ConnectionState' 'FAIL' "State is $($hv.Runtime.ConnectionState) - remaining host checks skipped"
             continue
         }
-        Add-Result 'HostHealth' $hName 'ConnectionState' 'PASS' 'Connected'
+        Add-Result 'HostHealth' $hName 'ConnectionState' 'NORMAL' 'Connected'
 
         # ESXi build vs vCenter build. VMware only supports ESXi hosts within
         # roughly N-2 major versions of vCenter, and a host *newer* than
@@ -651,7 +651,7 @@ try {
         } elseif ($hVersion -ne $vcConn.Version) {
             Add-Result 'HostHealth' $hName 'VersionVsVCenter' 'WARN' "ESXi $hVersion build $hBuild differs from vCenter $($vcConn.Version) build $($vcConn.Build)"
         } else {
-            Add-Result 'HostHealth' $hName 'VersionVsVCenter' 'PASS' "ESXi $hVersion build $hBuild matches vCenter $($vcConn.Version) build $($vcConn.Build)"
+            Add-Result 'HostHealth' $hName 'VersionVsVCenter' 'NORMAL' "ESXi $hVersion build $hBuild matches vCenter $($vcConn.Version) build $($vcConn.Build)"
         }
 
         # Host services came with the view; no per-host service query.
@@ -687,9 +687,9 @@ try {
                 if ($ExpectedNtpServer) { $detail += " | Expected: $($ExpectedNtpServer -join ', ')" }
                 Add-Result 'HostHealth' $hName 'NTP' 'WARN' $detail
             } elseif ($ExpectedNtpServer) {
-                Add-Result 'HostHealth' $hName 'NTP' 'PASS' "Running; servers: $($ntpServers -join ', ') (matches expected baseline)"
+                Add-Result 'HostHealth' $hName 'NTP' 'NORMAL' "Running; servers: $($ntpServers -join ', ') (matches expected baseline)"
             } else {
-                Add-Result 'HostHealth' $hName 'NTP' 'PASS' "Running; servers: $($ntpServers -join ', ')"
+                Add-Result 'HostHealth' $hName 'NTP' 'NORMAL' "Running; servers: $($ntpServers -join ', ')"
             }
         }
 
@@ -707,7 +707,7 @@ try {
                 Add-Result 'HostHealth' $hName 'Syslog' 'WARN' 'No remote syslog target configured'
             }
         } elseif (-not $ExpectedSyslogServer) {
-            Add-Result 'HostHealth' $hName 'Syslog' 'PASS' "Target: $($syslogActual -join ', ')"
+            Add-Result 'HostHealth' $hName 'Syslog' 'NORMAL' "Target: $($syslogActual -join ', ')"
         } else {
             $sysCmp    = Compare-TargetBaseline -Actual $syslogActual -Expected $ExpectedSyslogServer
             $sysIssues = New-Object System.Collections.Generic.List[object]
@@ -721,7 +721,7 @@ try {
             if ($sysIssues.Count -gt 0) {
                 Add-Result 'HostHealth' $hName 'Syslog' 'WARN' "Configured: $($syslogActual -join ', ') | $($sysIssues -join ' | ') | Expected: $($ExpectedSyslogServer -join ', ')"
             } else {
-                Add-Result 'HostHealth' $hName 'Syslog' 'PASS' "Target: $($syslogActual -join ', ') (matches expected baseline)"
+                Add-Result 'HostHealth' $hName 'Syslog' 'NORMAL' "Target: $($syslogActual -join ', ') (matches expected baseline)"
             }
         }
 
@@ -746,7 +746,7 @@ try {
             # Saying "all accessible" here would be a false all-clear.
             Add-Result 'HostHealth' $hName 'DatastoreConnectivity' 'INFO' "Accessibility not reported by vCenter for $($dsUnknown.Count) of $($dsList.Count) datastore(s): $(($dsUnknown.Name) -join ',')"
         } else {
-            Add-Result 'HostHealth' $hName 'DatastoreConnectivity' 'PASS' 'All datastores accessible'
+            Add-Result 'HostHealth' $hName 'DatastoreConnectivity' 'NORMAL' 'All datastores accessible'
         }
 
         # Storage path state - a LUN can still show as "accessible" on remaining
@@ -822,7 +822,7 @@ try {
             $severity = if ($offlineLuns.Count -gt 0) { 'FAIL' } else { 'WARN' }
             Add-Result 'HostHealth' $hName 'PathState' $severity ($parts -join ' | ')
         } elseif ($diskLuns.Count -gt 0) {
-            Add-Result 'HostHealth' $hName 'PathState' 'PASS' "$totalPaths path(s) across $($diskLuns.Count) LUN(s), all active"
+            Add-Result 'HostHealth' $hName 'PathState' 'NORMAL' "$totalPaths path(s) across $($diskLuns.Count) LUN(s), all active"
         } elseif ($null -eq $hv.Config.StorageDevice) {
             # An empty result because the data never arrived is not the same as
             # a host with no block storage; "NFS-only" here would be a false
@@ -890,7 +890,7 @@ try {
             } elseif ($downUplinks.Count -gt 0) {
                 Add-Result 'HostHealth' $hName 'NicLinkState' 'WARN' "Uplink(s) with no link: $($downUplinks -join ', ') - still carrying traffic on the remaining uplink(s); check the cable and the physical switch port"
             } else {
-                Add-Result 'HostHealth' $hName 'NicLinkState' 'PASS' "All assigned uplinks have link across $($switches.Count) switch(es)"
+                Add-Result 'HostHealth' $hName 'NicLinkState' 'NORMAL' "All assigned uplinks have link across $($switches.Count) switch(es)"
             }
 
             # Fewer than two live uplinks means one cable, NIC or switch port
@@ -899,7 +899,7 @@ try {
                 if ($thinSwitches.Count -gt 0) {
                     Add-Result 'HostHealth' $hName 'UplinkRedundancy' 'WARN' "No uplink redundancy on: $($thinSwitches -join ', ') - a single cable, NIC or switch port failure takes this traffic down"
                 } else {
-                    Add-Result 'HostHealth' $hName 'UplinkRedundancy' 'PASS' "Every switch has at least two uplinks with link"
+                    Add-Result 'HostHealth' $hName 'UplinkRedundancy' 'NORMAL' "Every switch has at least two uplinks with link"
                 }
             }
 
@@ -911,7 +911,7 @@ try {
             } elseif ($dns.Count -eq 0) {
                 Add-Result 'HostHealth' $hName 'DNS' 'WARN' 'No DNS servers configured - name resolution failures show up as confusing errors elsewhere'
             } else {
-                Add-Result 'HostHealth' $hName 'DNS' 'PASS' "Servers: $($dns -join ', ')"
+                Add-Result 'HostHealth' $hName 'DNS' 'NORMAL' "Servers: $($dns -join ', ')"
             }
         }
 
@@ -938,7 +938,7 @@ try {
                 } elseif ($daysLeft -le $CertExpiryWarnDays) {
                     Add-Result 'HostHealth' $hName 'CertificateExpiry' 'WARN' "Expires in $daysLeft day(s) (NotAfter: $($cert.NotAfter))"
                 } else {
-                    Add-Result 'HostHealth' $hName 'CertificateExpiry' 'PASS' "Valid until $($cert.NotAfter) ($daysLeft days)"
+                    Add-Result 'HostHealth' $hName 'CertificateExpiry' 'NORMAL' "Valid until $($cert.NotAfter) ($daysLeft days)"
                 }
             }
         } catch {
@@ -964,7 +964,7 @@ try {
             } elseif ($pwMaxDays -gt $PasswordMaxDaysWarn) {
                 Add-Result 'HostHealth' $hName 'PasswordExpirationPolicy' 'WARN' "Security.PasswordMaxDays = $pwMaxDays days, above the $PasswordMaxDaysWarn-day threshold ($pwNote)"
             } else {
-                Add-Result 'HostHealth' $hName 'PasswordExpirationPolicy' 'PASS' "Security.PasswordMaxDays = $pwMaxDays days ($pwNote)"
+                Add-Result 'HostHealth' $hName 'PasswordExpirationPolicy' 'NORMAL' "Security.PasswordMaxDays = $pwMaxDays days ($pwNote)"
             }
         }
 
@@ -974,8 +974,8 @@ try {
         $lockdown = $hv.Config.LockdownMode
         switch ([string]$lockdown) {
             'lockdownDisabled' { Add-Result 'HostHealth' $hName 'LockdownMode' 'WARN' 'Disabled - direct root/local logins to this host bypass vCenter, reducing auditability; consider Normal or Strict lockdown' }
-            'lockdownNormal'   { Add-Result 'HostHealth' $hName 'LockdownMode' 'PASS' 'Normal' }
-            'lockdownStrict'   { Add-Result 'HostHealth' $hName 'LockdownMode' 'PASS' 'Strict' }
+            'lockdownNormal'   { Add-Result 'HostHealth' $hName 'LockdownMode' 'NORMAL' 'Normal' }
+            'lockdownStrict'   { Add-Result 'HostHealth' $hName 'LockdownMode' 'NORMAL' 'Strict' }
             default            { Add-Result 'HostHealth' $hName 'LockdownMode' 'INFO' "Could not read lockdown mode ($lockdown)" }
         }
 
@@ -1002,7 +1002,7 @@ try {
             }) -join ', '
             Add-Result 'HostHealth' $hName 'Services' 'WARN' "$($svcDown.Count) of $($svcManaged.Count) service(s) set to start with the host are stopped: $svcNames"
         } else {
-            Add-Result 'HostHealth' $hName 'Services' 'PASS' "All $($svcManaged.Count) service(s) set to start with the host are running"
+            Add-Result 'HostHealth' $hName 'Services' 'NORMAL' "All $($svcManaged.Count) service(s) set to start with the host are running"
         }
 
         # SSH (TSM-SSH) service - often enabled temporarily for troubleshooting
@@ -1013,7 +1013,7 @@ try {
         } elseif ($sshSvc.Running) {
             Add-Result 'HostHealth' $hName 'SSHEnabled' 'WARN' 'SSH service is running - confirm this is intentional; leaving it enabled long-term increases attack surface'
         } else {
-            Add-Result 'HostHealth' $hName 'SSHEnabled' 'PASS' 'SSH service not running'
+            Add-Result 'HostHealth' $hName 'SSHEnabled' 'NORMAL' 'SSH service not running'
         }
     }
     #endregion
@@ -1074,7 +1074,7 @@ try {
         # failure, so a healthy VM is never flagged just because vCenter didn't
         # hand back the property.
         switch ([string]$connState) {
-            'connected'    { Add-Result 'VMCompliance' $vmName 'ConnectionState' 'PASS' "Connected to vCenter ($powerState)" }
+            'connected'    { Add-Result 'VMCompliance' $vmName 'ConnectionState' 'NORMAL' "Connected to vCenter ($powerState)" }
             'disconnected' { Add-Result 'VMCompliance' $vmName 'ConnectionState' 'WARN' 'Disconnected - the host running this VM is currently unreachable from vCenter' }
             'orphaned'     { Add-Result 'VMCompliance' $vmName 'ConnectionState' 'FAIL' 'Orphaned - vCenter has an inventory entry but the host does not report this VM (shows as a question mark in the vSphere Client)' }
             'inaccessible' { Add-Result 'VMCompliance' $vmName 'ConnectionState' 'FAIL' 'Inaccessible - the VM config file (.vmx) cannot be read, usually a datastore or storage problem' }
@@ -1087,20 +1087,20 @@ try {
         # left behind by backup software that didn't clean up after itself,
         # that silently consume growing datastore space until consolidated.
         # $null (property unavailable) is distinct from $false here: reporting
-        # it as PASS would silently claim a clean result that was never checked.
+        # it as NORMAL would silently claim a clean result that was never checked.
         if ($null -eq $consolidation) {
             Add-Result 'VMCompliance' $vmName 'DiskConsolidation' 'INFO' 'Consolidation state not reported by vCenter for this VM'
         } elseif ($consolidation) {
             Add-Result 'VMCompliance' $vmName 'DiskConsolidation' 'WARN' 'Disk consolidation needed - leftover snapshot delta disk(s) present; consolidate from the vSphere Client (Snapshots > Consolidate)'
         } else {
-            Add-Result 'VMCompliance' $vmName 'DiskConsolidation' 'PASS' 'No consolidation needed'
+            Add-Result 'VMCompliance' $vmName 'DiskConsolidation' 'NORMAL' 'No consolidation needed'
         }
 
         # VMware Tools status (only meaningful when powered on)
         if ($powerState -eq 'poweredOn') {
             $toolsStatus = [string]$vv.Guest.ToolsStatus
             switch ($toolsStatus) {
-                'toolsOk'          { Add-Result 'VMCompliance' $vmName 'VMwareTools' 'PASS' 'toolsOk' }
+                'toolsOk'          { Add-Result 'VMCompliance' $vmName 'VMwareTools' 'NORMAL' 'toolsOk' }
                 'toolsOld'         { Add-Result 'VMCompliance' $vmName 'VMwareTools' 'WARN' 'Tools out of date' }
                 'toolsNotRunning'  { Add-Result 'VMCompliance' $vmName 'VMwareTools' 'WARN' 'Tools not running' }
                 'toolsNotInstalled'{ Add-Result 'VMCompliance' $vmName 'VMwareTools' 'FAIL' 'Tools not installed' }
@@ -1123,7 +1123,7 @@ try {
                     if ($freePct -lt $OSDriveFreeWarnPercent) {
                         Add-Result 'VMCompliance' $vmName 'OSDriveFree' 'WARN' "$detail (< $OSDriveFreeWarnPercent%)"
                     } else {
-                        Add-Result 'VMCompliance' $vmName 'OSDriveFree' 'PASS' $detail
+                        Add-Result 'VMCompliance' $vmName 'OSDriveFree' 'NORMAL' $detail
                     }
                 } else {
                     Add-Result 'VMCompliance' $vmName 'OSDriveFree' 'INFO' 'No C:\ or / drive reported by Tools'
@@ -1140,7 +1140,7 @@ try {
                     if ($freePct -lt $DataDriveFreeWarnPercent) {
                         Add-Result 'VMCompliance' $vmName 'DataDriveFree' 'WARN' "$detail (< $DataDriveFreeWarnPercent%)"
                     } else {
-                        Add-Result 'VMCompliance' $vmName 'DataDriveFree' 'PASS' $detail
+                        Add-Result 'VMCompliance' $vmName 'DataDriveFree' 'NORMAL' $detail
                     }
                 }
             }
@@ -1153,7 +1153,7 @@ try {
         # against VMware's compatibility guide.
         # PowerCLI has reported this property as both 'vmx-19' and a bare '19'
         # across releases, so accept either, and report a value matching neither
-        # as INFO rather than letting it fall through to PASS unexamined.
+        # as INFO rather than letting it fall through to NORMAL unexamined.
         $hwVersion = $vv.Config.Version
         $hwNum = 0
         if ($hwVersion -match '(?:vmx-)?(\d+)$') { $hwNum = [int]$Matches[1] }
@@ -1187,7 +1187,7 @@ try {
             }
             Add-Result 'VMCompliance' $vmName 'HardwareVersion' 'WARN' "$hwVersion is below the vmx-$HardwareVersionWarnNum baseline. $advice $guestClause before upgrading; it requires a power-off and cannot be rolled back."
         } else {
-            Add-Result 'VMCompliance' $vmName 'HardwareVersion' 'PASS' "$hwVersion (at or above the vmx-$HardwareVersionWarnNum baseline)"
+            Add-Result 'VMCompliance' $vmName 'HardwareVersion' 'NORMAL' "$hwVersion (at or above the vmx-$HardwareVersionWarnNum baseline)"
         }
 
         # Virtual hardware came with the view, so CD and floppy drives are read
@@ -1262,7 +1262,7 @@ try {
         } elseif ($freePct -lt $DatastoreFreeWarnPercent) {
             Add-Result 'Capacity' $dv.Name 'DatastoreFree' 'WARN' $detail
         } else {
-            Add-Result 'Capacity' $dv.Name 'DatastoreFree' 'PASS' $detail
+            Add-Result 'Capacity' $dv.Name 'DatastoreFree' 'NORMAL' $detail
         }
     }
 
@@ -1288,12 +1288,12 @@ try {
 
         if ($totalCpuMhz -gt 0) {
             $cpuPct = [math]::Round(($usedCpuMhz / $totalCpuMhz) * 100, 1)
-            $status = if ($cpuPct -ge $ClusterUsageWarnPercent) { 'WARN' } else { 'PASS' }
+            $status = if ($cpuPct -ge $ClusterUsageWarnPercent) { 'WARN' } else { 'NORMAL' }
             Add-Result 'Capacity' $cv.Name 'ClusterCPU' $status "$cpuPct% used"
         }
         if ($totalMemGB -gt 0) {
             $memPct = [math]::Round(($usedMemGB / $totalMemGB) * 100, 1)
-            $status = if ($memPct -ge $ClusterUsageWarnPercent) { 'WARN' } else { 'PASS' }
+            $status = if ($memPct -ge $ClusterUsageWarnPercent) { 'WARN' } else { 'NORMAL' }
             Add-Result 'Capacity' $cv.Name 'ClusterRAM' $status "$memPct% used"
         }
     }
@@ -1311,7 +1311,7 @@ try {
         if ($null -eq $dasCfg) {
             Add-Result 'ClusterConfig' $clName 'HA' 'INFO' 'HA configuration not reported by vCenter for this cluster'
         } elseif ($dasCfg.Enabled) {
-            Add-Result 'ClusterConfig' $clName 'HA' 'PASS' 'High Availability enabled (restarts VMs on the surviving hosts if a host fails)'
+            Add-Result 'ClusterConfig' $clName 'HA' 'NORMAL' 'High Availability enabled (restarts VMs on the surviving hosts if a host fails)'
         } else {
             Add-Result 'ClusterConfig' $clName 'HA' 'WARN' 'High Availability disabled - if a host fails, the VMs it was running will stay down until someone restarts them by hand'
         }
@@ -1323,7 +1323,7 @@ try {
             Add-Result 'ClusterConfig' $clName 'AdmissionControl' 'INFO' 'Admission control state not reported by vCenter for this cluster'
         } elseif ($dasCfg.Enabled) {
             if ($dasCfg.AdmissionControlEnabled) {
-                Add-Result 'ClusterConfig' $clName 'AdmissionControl' 'PASS' 'Enabled - HA holds back enough spare capacity to restart the VMs from a failed host, and blocks power-ons that would eat into that reserve'
+                Add-Result 'ClusterConfig' $clName 'AdmissionControl' 'NORMAL' 'Enabled - HA holds back enough spare capacity to restart the VMs from a failed host, and blocks power-ons that would eat into that reserve'
             } else {
                 Add-Result 'ClusterConfig' $clName 'AdmissionControl' 'WARN' 'Disabled - HA reserves no spare capacity, so VMs from a failed host may fail to restart if the remaining hosts are already committed'
             }
@@ -1334,7 +1334,7 @@ try {
             Add-Result 'ClusterConfig' $clName 'DRS' 'INFO' 'DRS configuration not reported by vCenter for this cluster'
         } elseif ($drsCfg.Enabled) {
             $drsLevel = [string]$drsCfg.DefaultVmBehavior
-            Add-Result 'ClusterConfig' $clName 'DRS' 'PASS' "Distributed Resource Scheduler enabled, $drsLevel (balances VM load across hosts using vMotion)"
+            Add-Result 'ClusterConfig' $clName 'DRS' 'NORMAL' "Distributed Resource Scheduler enabled, $drsLevel (balances VM load across hosts using vMotion)"
             if ($drsLevel -ne 'fullyAutomated') {
                 Add-Result 'ClusterConfig' $clName 'DRSAutomation' 'WARN' "DRS is set to $drsLevel, not FullyAutomated - it only recommends migrations instead of performing them, so rebalancing waits on someone approving them"
             }
@@ -1362,7 +1362,7 @@ try {
         if ($null -eq $cv.Summary) {
             Add-Result 'ClusterConfig' $clName 'EVC' 'INFO' 'EVC mode not reported by vCenter for this cluster - could not determine whether it is enabled'
         } elseif ($cv.Summary.CurrentEVCModeKey) {
-            Add-Result 'ClusterConfig' $clName 'EVC' 'PASS' "Enhanced vMotion Compatibility enabled, baseline '$($cv.Summary.CurrentEVCModeKey)' (masks host CPUs to a common instruction set so running VMs can vMotion between hosts with different CPU generations)"
+            Add-Result 'ClusterConfig' $clName 'EVC' 'NORMAL' "Enhanced vMotion Compatibility enabled, baseline '$($cv.Summary.CurrentEVCModeKey)' (masks host CPUs to a common instruction set so running VMs can vMotion between hosts with different CPU generations)"
         } else {
             Add-Result 'ClusterConfig' $clName 'EVC' 'INFO' 'Enhanced vMotion Compatibility (masks host CPUs to a common instruction set so running VMs can vMotion between hosts with different CPU generations) is not configured - fine if every host is the same CPU generation; worth enabling as a hedge before adding a differing host'
         }
@@ -1386,7 +1386,7 @@ finally {
     $htmlFile  = Join-Path $ReportPath "VMwareHealthCheck-$stamp.html"
 
     # Dashboard-style layout: blue header and sidebar, status pill badges,
-    # and a stat-tile summary row instead of a plain text line.
+    # and two summary rings instead of a plain text line.
     $style = @"
 <style>
  :root {
@@ -1401,7 +1401,12 @@ finally {
   --bg: #eef1f5; --surface: #ffffff; --border: #dbe1e8;
   --text: #1c2733; --muted: #64748b;
   --ok: #1e7c34; --ok-bg: #e6f4ea;
-  --warn: #96650b; --warn-bg: #fff4e0;
+  /* #946600 rather than #96650b: measured against --crit, the old pair sat
+     at deltaE 14.9 for normal vision - under the 15 floor, i.e. hard to
+     tell apart even with full colour vision, which matters now that the
+     two sit next to each other on a ring. This clears it at 15.4 while
+     holding badge text contrast at 4.63 (AA), same as before. */
+  --warn: #946600; --warn-bg: #fff4e0;
   --crit: #a61b1b; --crit-bg: #fdeaea;
   --info: #51606f; --info-bg: #eef1f4;
  }
@@ -1428,37 +1433,44 @@ finally {
  .content { flex: 1; min-width: 0; padding: 24px; }
  .meta-line { color: var(--muted); font-size: 13px; margin: 0 0 16px; }
  /* The tiles AND the filter buttons freeze together as one toolbar. Freezing
-    only the tiles left the FAIL/WARN/INFO/PASS buttons - and their counts -
+    only the tiles left the FAIL/WARN/INFO/NORMAL buttons - and their counts -
     scrolling away under it. Negative margin + matching padding bleeds the
     background across .content's 24px gutters, so rows scrolling underneath
     don't show through at the edges. */
  .toolbar { position: sticky; top: 0; z-index: 20; background: var(--bg);
             margin: 0 -24px 18px; padding: 12px 24px 12px;
             box-shadow: 0 1px 0 var(--border), 0 4px 10px -6px rgba(16,24,40,.28); }
- .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin: 0 0 12px; }
- .stat-tile { background: var(--surface); border: 1px solid var(--border); border-left: 4px solid var(--muted); border-radius: 8px; padding: 14px 16px; cursor: pointer; text-align: left; font: inherit; }
- .stat-tile .stat-num { display: block; font-size: 26px; font-weight: 700; line-height: 1.1; }
- .stat-tile .stat-label { display: block; font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; margin-top: 2px; }
- .stat-tile.stat-FAIL { border-left-color: var(--crit); }
- .stat-tile.stat-FAIL .stat-num { color: var(--crit); }
- .stat-tile.stat-WARN { border-left-color: var(--warn); }
- .stat-tile.stat-WARN .stat-num { color: var(--warn); }
- .stat-tile.stat-INFO { border-left-color: var(--info); }
- .stat-tile.stat-INFO .stat-num { color: var(--info); }
- .stat-tile.stat-PASS { border-left-color: var(--ok); }
- .stat-tile.stat-PASS .stat-num { color: var(--ok); }
- .stat-tile.active { box-shadow: 0 0 0 2px var(--accent) inset; }
+ /* Two rings: objects rolled up to a health state, and every result by
+    severity - the same pair an inventory console shows. Part-to-whole at a
+    glance; the legend beside each carries the exact numbers. */
+ .summary { display: flex; flex-wrap: wrap; gap: 28px; margin: 0 0 14px; }
+ .donut-card { display: flex; align-items: center; gap: 18px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 12px 20px 12px 14px; flex: 1 1 320px; min-width: 300px; }
+ .donut-wrap { position: relative; flex: none; width: 116px; height: 116px; }
+ .donut { display: block; transform: rotate(-90deg); }
+ .donut-track { stroke: #e6ebf1; }
+ .donut-center { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; pointer-events: none; }
+ .donut-num { font-size: 26px; font-weight: 700; line-height: 1; color: var(--text); }
+ .donut-cap { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin-top: 3px; }
+ .donut-legend { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+ /* Never colour alone: swatch + count + word on every row. */
+ .legend-row { display: flex; align-items: center; gap: 8px; background: none; border: 0; border-radius: 5px; padding: 3px 8px 3px 4px; cursor: pointer; font: inherit; text-align: left; color: var(--text); }
+ .legend-row:hover { background: var(--bg); }
+ .legend-row.active { background: var(--bg); box-shadow: inset 0 0 0 1px var(--accent); }
+ .legend-row.zero { opacity: .45; }
+ .legend-dot { width: 10px; height: 10px; border-radius: 2px; flex: none; }
+ .legend-count { font-weight: 700; font-size: 14px; min-width: 2.5em; }
+ .legend-label { font-size: 13px; color: var(--muted); }
  .filters { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 20px; }
  .filters button { font: inherit; font-size: 13px; padding: 7px 14px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); color: var(--text); cursor: pointer; }
  .filters button:hover { border-color: var(--accent); color: var(--accent); }
  .filters button.active { background: var(--accent); color: #fff; border-color: var(--accent); }
- h2 { color: var(--brand-2); margin: 28px 0 4px; padding-left: 10px; border-left: 4px solid var(--accent); font-size: 16px; scroll-margin-top: 172px; }
+ h2 { color: var(--brand-2); margin: 28px 0 4px; padding-left: 10px; border-left: 4px solid var(--accent); font-size: 16px; scroll-margin-top: 246px; }
  table { border-collapse: collapse; width: 100%; margin-top: 6px; background: var(--surface); border-radius: 6px; overflow: hidden; box-shadow: 0 1px 2px rgba(16,24,40,.05); }
  th, td { border-bottom: 1px solid var(--border); padding: 8px 12px; text-align: left; font-size: 13px; }
  th { background: var(--brand-2); color: #fff; font-weight: 600; }
  tr:hover td { background: #f5f8fb; }
  .badge { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 11px; font-weight: 700; letter-spacing: .03em; }
- .badge-PASS { background: var(--ok-bg); color: var(--ok); }
+ .badge-NORMAL { background: var(--ok-bg); color: var(--ok); }
  .badge-WARN { background: var(--warn-bg); color: var(--warn); }
  .badge-FAIL { background: var(--crit-bg); color: var(--crit); }
  .badge-INFO { background: var(--info-bg); color: var(--info); }
@@ -1483,11 +1495,104 @@ finally {
     $cFail = @($script:Results | Where-Object { $_.Status -eq 'FAIL' }).Count
     $cWarn = @($script:Results | Where-Object { $_.Status -eq 'WARN' }).Count
     $cInfo = @($script:Results | Where-Object { $_.Status -eq 'INFO' }).Count
-    $cPass = @($script:Results | Where-Object { $_.Status -eq 'PASS' }).Count
+    $cNormal = @($script:Results | Where-Object { $_.Status -eq 'NORMAL' }).Count
     $cAttn = $cFail + $cWarn
     # $script:Results is a List[object]; read .Count directly. Wrapping it as
     # @($script:Results).Count throws "Argument types do not match" in WinPS 5.1.
     $cAll  = $script:Results.Count
+
+    # One ring per summary, drawn as plain SVG so the report stays a single
+    # self-contained file with no CDN - these get opened on jump boxes with no
+    # internet. Part-to-whole at a glance only: four segments, with the exact
+    # numbers in the legend beside it rather than on the ring.
+    function Format-DonutSvg {
+        param(
+            [object[]] $Segments,   # Label / Count / Color, in fixed order
+            [int]      $Size = 116
+        )
+        $live = @($Segments | Where-Object { $_.Count -gt 0 })
+        $sum  = 0
+        foreach ($sg in $live) { $sum += $sg.Count }
+
+        $svg = New-Object System.Text.StringBuilder
+        [void]$svg.Append("<svg class='donut' viewBox='0 0 42 42' width='$Size' height='$Size' aria-hidden='true'>")
+        [void]$svg.Append("<circle class='donut-track' cx='21' cy='21' r='15.9155' fill='none' stroke-width='4.2'/>")
+
+        if ($sum -gt 0) {
+            # A 2px surface gap between adjacent fills, so segments are
+            # separated by geometry and not by hue alone - which is what makes
+            # the red/amber pair legible for a deuteranomalous reader. Skipped
+            # when one status is everything, where a gap would just be a notch.
+            $gap      = if ($live.Count -gt 1) { 1.1 } else { 0 }
+            $cumulate = 0.0
+            foreach ($sg in $live) {
+                $len  = ($sg.Count / [double]$sum) * 100.0
+                $draw = [math]::Max($len - $gap, 0.5)
+                $off  = 25.0 - $cumulate
+                while ($off -lt 0) { $off += 100 }
+                [void]$svg.Append(("<circle cx='21' cy='21' r='15.9155' fill='none' stroke='{0}' stroke-width='4.2' stroke-linecap='butt' stroke-dasharray='{1} {2}' stroke-dashoffset='{3}'/>" -f `
+                    $sg.Color, [math]::Round($draw,2), [math]::Round(100 - $draw,2), [math]::Round($off,2)))
+                $cumulate += $len
+            }
+        }
+        [void]$svg.Append('</svg>')
+        $svg.ToString()
+    }
+
+    # Roll each object up to a single health bucket: Critical if anything about
+    # it FAILs, Warning if anything WARNs, Normal otherwise. Three buckets, not
+    # four - an "Unknown" slice would only ever catch an object whose every row
+    # was informational, which is rare enough that it reads as an empty
+    # mystery rather than as information.
+    $objState = @{}
+    foreach ($r in $script:Results) {
+        $cur = $objState[$r.Object]
+        $rank = switch ($r.Status) { 'FAIL' { 3 } 'WARN' { 2 } default { 1 } }
+        if ($null -eq $cur -or $rank -gt $cur) { $objState[$r.Object] = $rank }
+    }
+    $oCrit = 0; $oWarn = 0; $oNorm = 0
+    foreach ($v in $objState.Values) {
+        switch ($v) { 3 { $oCrit++ } 2 { $oWarn++ } default { $oNorm++ } }
+    }
+    $oTotal = $objState.Count
+
+    $objSegments = @(
+        [pscustomobject]@{ Label = 'Critical'; Count = $oCrit; Color = 'var(--crit)'; Filter = 'FAIL' }
+        [pscustomobject]@{ Label = 'Warning';  Count = $oWarn; Color = 'var(--warn)'; Filter = 'WARN' }
+        [pscustomobject]@{ Label = 'Normal';   Count = $oNorm; Color = 'var(--ok)';   Filter = 'NORMAL' }
+    )
+    $resSegments = @(
+        [pscustomobject]@{ Label = 'Fail'; Count = $cFail; Color = 'var(--crit)'; Filter = 'FAIL' }
+        [pscustomobject]@{ Label = 'Warn'; Count = $cWarn; Color = 'var(--warn)'; Filter = 'WARN' }
+        [pscustomobject]@{ Label = 'Info'; Count = $cInfo; Color = 'var(--info)'; Filter = 'INFO' }
+        [pscustomobject]@{ Label = 'Normal'; Count = $cNormal; Color = 'var(--ok)';   Filter = 'NORMAL' }
+    )
+
+    function Format-DonutLegend {
+        param([object[]] $Segments)
+        $rows = foreach ($sg in $Segments) {
+            # Never colour alone: every row carries a swatch, a count AND a
+            # word, so the ring is decoration on top of a readable list.
+            # A bucket with nothing in it stays listed - the legend shouldn't
+            # reflow between runs - but is muted so it doesn't read as a finding.
+            $zero = if ($sg.Count -eq 0) { ' zero' } else { '' }
+            "<button class='legend-row$zero' data-filter='$($sg.Filter)'><span class='legend-dot' style='background:$($sg.Color)'></span><span class='legend-count'>$($sg.Count)</span><span class='legend-label'>$($sg.Label)</span></button>"
+        }
+        $rows -join ''
+    }
+
+    $summaryHtml = @"
+<div class="summary">
+  <div class="donut-card">
+    <div class="donut-wrap">$(Format-DonutSvg -Segments $objSegments)<div class="donut-center"><span class="donut-num">$oTotal</span><span class="donut-cap">Objects</span></div></div>
+    <div class="donut-legend">$(Format-DonutLegend -Segments $objSegments)</div>
+  </div>
+  <div class="donut-card">
+    <div class="donut-wrap">$(Format-DonutSvg -Segments $resSegments)<div class="donut-center"><span class="donut-num">$cAll</span><span class="donut-cap">Results</span></div></div>
+    <div class="donut-legend">$(Format-DonutLegend -Segments $resSegments)</div>
+  </div>
+</div>
+"@
 
     # Group results into per-check sections (Category + Check), preserving
     # first-seen order. Each becomes its own anchored table, navigable from the
@@ -1553,18 +1658,13 @@ $secRows
  <main class="content">
   <a id="top"></a>
   <div class="toolbar">
-  <div class="stats">
-   <button class="stat-tile stat-FAIL" data-filter="FAIL"><span class="stat-num">$cFail</span><span class="stat-label">Fail</span></button>
-   <button class="stat-tile stat-WARN" data-filter="WARN"><span class="stat-num">$cWarn</span><span class="stat-label">Warn</span></button>
-   <button class="stat-tile stat-INFO" data-filter="INFO"><span class="stat-num">$cInfo</span><span class="stat-label">Info</span></button>
-   <button class="stat-tile stat-PASS" data-filter="PASS"><span class="stat-num">$cPass</span><span class="stat-label">Pass</span></button>
-  </div>
+  $summaryHtml
   <div class="filters">
    <button data-filter="attention" class="active">Needs attention &mdash; FAIL + WARN ($cAttn)</button>
    <button data-filter="FAIL">FAIL ($cFail)</button>
    <button data-filter="WARN">WARN ($cWarn)</button>
    <button data-filter="INFO">INFO ($cInfo)</button>
-   <button data-filter="PASS">PASS ($cPass)</button>
+   <button data-filter="NORMAL">NORMAL ($cNormal)</button>
    <button data-filter="all">All ($cAll)</button>
   </div>
   </div>
@@ -1575,7 +1675,7 @@ $secRows
 <script>
 (function(){
  var buttons = document.querySelectorAll('.filters button');
- var tiles = document.querySelectorAll('.stat-tile');
+ var tiles = document.querySelectorAll('.legend-row');
  var rows = document.querySelectorAll('table tr[data-status]');
  var note = document.getElementById('emptyNote');
  var tables = document.querySelectorAll('[data-section-table]');
@@ -1588,8 +1688,8 @@ $secRows
    if (head) head.classList.toggle('hidden', vis === 0);
    // The sidebar entry follows its section. Under the default
    // "Needs attention" filter that leaves the contents listing showing only
-   // what needs attention - INFO/PASS-only sections such as Uptime stay out
-   // of the way until you click INFO or PASS to bring them back.
+   // what needs attention - INFO/NORMAL-only sections such as Uptime stay out
+   // of the way until you click INFO or NORMAL to bring them back.
    var link = document.querySelector('.sidebar [data-jump="' + id + '"]');
    if (link && link.parentElement) { link.parentElement.classList.toggle('hidden', vis === 0); }
   });

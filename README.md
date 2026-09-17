@@ -75,7 +75,7 @@ is supposed to have and each host's actual settings are compared against it in
 
 Either one is a `WARN`, and the detail shows what the host actually has *and*
 what was expected, side by side, so the fix is obvious from the report alone.
-An exact match is a `PASS` reading `(matches expected baseline)`. With a baseline
+An exact match is a `NORMAL` reading `(matches expected baseline)`. With a baseline
 supplied, a host with **nothing** configured is a `FAIL` rather than a `WARN` —
 you've declared a collector is required, and the requirement is entirely unmet.
 
@@ -145,7 +145,7 @@ does and what leaving it off costs you, rather than reporting a bare acronym:
   power-ons that would eat into that reserve. `WARN` when disabled, because HA is
   then enabled but reserving nothing — VMs from a failed host may fail to restart
   if the remaining hosts are already committed. This is an easy one to miss: HA
-  reads as `PASS` while the capacity to honor it isn't guaranteed.
+  reads as `NORMAL` while the capacity to honor it isn't guaranteed.
 - **DRS** (Distributed Resource Scheduler) — balances VM load across hosts using
   vMotion. `WARN` when disabled, and a separate `DRSAutomation` `WARN` when DRS is
   on but not `FullyAutomated`, since it then only *recommends* migrations and
@@ -153,7 +153,7 @@ does and what leaving it off costs you, rather than reporting a bare acronym:
 - **Host count** — `WARN` on a single-host cluster, where HA has nowhere to fail over.
 
 **EVC (Enhanced vMotion Compatibility).** Reported as `INFO`, not a finding.
-`PASS` with the cluster's current mode (e.g. `intel-broadwell`) when one is set;
+`NORMAL` with the cluster's current mode (e.g. `intel-broadwell`) when one is set;
 `INFO` when it isn't. EVC masks each host's CPU down to a common baseline
 instruction set so a running VM can vMotion between hosts with different CPU
 generations without the guest OS seeing the CPU change mid-flight — without it,
@@ -203,7 +203,7 @@ they cost no extra API calls:
 **Local account password expiration.** Reads `Security.PasswordMaxDays`, the
 host-wide maximum age a local password may reach. `WARN` at `99999` — VMware's
 shipped default and its "never expires" sentinel rather than an age anyone chose
-— or above `-PasswordMaxDaysWarn` (default 365); `PASS` below that; `INFO` if the
+— or above `-PasswordMaxDaysWarn` (default 365); `NORMAL` below that; `INFO` if the
 host doesn't report the setting. A specific account's actual days-until-expiry
 (root's included) isn't exposed by the vCenter API at all — that lives in the
 host's shadow file and needs SSH and `chage -l root` — so the detail says so
@@ -211,7 +211,7 @@ rather than implying the report has checked it.
 
 **ESXi build vs. vCenter build.** VMware only supports ESXi hosts within roughly two
 major versions behind vCenter, and a host *newer* than vCenter is unsupported outright
-and can break management features. `PASS` when a host's version matches vCenter's
+and can break management features. `NORMAL` when a host's version matches vCenter's
 exactly; `WARN` on a minor version difference; `FAIL` when a host is newer than
 vCenter, or more than `-HostVersionSkewFailMajors` (default 2) major versions behind
 it. No extra vCenter round-trip is needed — the connection object from
@@ -257,7 +257,7 @@ after itself, and easy to miss since it's a separate flag from the `Snapshot` ch
 above (a VM can need consolidation with no visible snapshot in the UI). Left alone,
 these silently consume growing datastore space.
 
-Findings are tagged `PASS` / `WARN` / `FAIL` / `INFO`. The script never modifies configuration.
+Findings are tagged `NORMAL` / `WARN` / `FAIL` / `INFO`. The script never modifies configuration.
 
 **Runtime.** Inventory is read in **bulk**: one `Get-View` per object type per
 vCenter, rather than a cmdlet call per host, per LUN and per VM. A run against
@@ -272,7 +272,7 @@ state, so a host with 40 LUNs alone was 45+ round-trips.
 | ~150 VMs | well under a minute |
 | 500+ VMs | a minute or two |
 
-Add ~10-30s for the initial PowerCLI module import. As long as `PASS`/`WARN` lines keep printing, it's working — not hung.
+Add ~10-30s for the initial PowerCLI module import. As long as `NORMAL`/`WARN` lines keep printing, it's working — not hung.
 
 **Output.** Everything printed to the console is also written to two timestamped files in `-ReportPath` (**defaults to the current directory** if not specified):
 
@@ -305,9 +305,19 @@ while `-Command` parses arguments properly but collapses any non-zero script exi
 powershell.exe -Command "& { .\HealthCheck\Invoke-VMwareHealthCheck.ps1 -VCenter vc1,vc2; exit $LASTEXITCODE }"
 ```
 
-The HTML report uses a **dashboard-style layout** — a Dell-blue header bar, with the sidebar, table headers and links all drawn from that same blue, and status pill badges (`PASS`/`WARN`/`FAIL`/`INFO`), similar in feel to a Dell iDRAC or OpenManage console. Color-coded **stat tiles** at the top (Fail / Warn / Info / Pass counts) are clickable and double as the severity filter. The tiles and the filter buttons together **stay frozen at the top of the page** like a spreadsheet header row, so every count and filter stays reachable from anywhere in a long report instead of forcing a scroll back up — shown alongside the same **`Needs attention`, `FAIL`, `WARN`, `INFO`, `PASS`, `All`** filter buttons — the report opens pre-filtered to `FAIL` + `WARN` (what needs fixing), so you can drill straight to the problems instead of scrolling past everything that passed.
+The HTML report uses a **dashboard-style layout** — a Dell-blue header bar, with the sidebar, table headers and links all drawn from that same blue, and status pill badges (`NORMAL`/`WARN`/`FAIL`/`INFO`), similar in feel to a Dell iDRAC or OpenManage console. Two **summary rings** sit at the top, the way an inventory console shows them:
+one for **objects** — every host, VM, datastore and cluster rolled up to a single
+health state (Critical if anything about it fails, Warning if anything warns,
+Normal otherwise) — and one for **results**, every row by severity. Each ring's
+legend carries the exact counts and is clickable, so it doubles as the severity
+filter. The rings and the filter buttons together **stay frozen at the top of the
+page** like a spreadsheet header row, so every count and filter stays reachable
+from anywhere in a long report — alongside the same **`Needs attention`, `FAIL`,
+`WARN`, `INFO`, `NORMAL`, `All`** filter buttons — and the report opens
+pre-filtered to `FAIL` + `WARN` (what needs fixing), so you can drill straight to
+the problems instead of scrolling past everything that's fine.
 
-Results are also broken into **per-check sections** (e.g. *VMware Tools*, *Hardware Version*, *Mounted ISOs*, *Snapshots*, *NTP*, *Datastore Free*), each in its own table. The left **sidebar** lists every section grouped by category, with `FAIL`/`WARN` badges marking where the problems are — the **whole row is the link**, name and badges alike. Check names are spaced out there (`Certificate Expiry`, not `CertificateExpiry`) so the narrow column wraps at word boundaries; section headings keep the raw name, matching the CSV. Severity filtering and section navigation work together: under a filter, sections with no matching rows are hidden automatically — **and so are their sidebar entries**, so a report opened on `Needs attention` lists only what needs attention rather than every check that ran. `INFO` and `PASS`-only sections (host `Uptime`, for instance) stay out of the way until you click the `INFO` or `PASS` button to bring them back, so nothing reads as an alert that isn't one. Clicking a sidebar entry whose section is hidden reveals **just that section** — it does not drop the whole report back to `All`. (The CSV stays complete and unfiltered for trending; open it in Excel and use AutoFilter on the Status column for the same effect.)
+Results are also broken into **per-check sections** (e.g. *VMware Tools*, *Hardware Version*, *Mounted ISOs*, *Snapshots*, *NTP*, *Datastore Free*), each in its own table. The left **sidebar** lists every section grouped by category, with `FAIL`/`WARN` badges marking where the problems are — the **whole row is the link**, name and badges alike. Check names are spaced out there (`Certificate Expiry`, not `CertificateExpiry`) so the narrow column wraps at word boundaries; section headings keep the raw name, matching the CSV. Severity filtering and section navigation work together: under a filter, sections with no matching rows are hidden automatically — **and so are their sidebar entries**, so a report opened on `Needs attention` lists only what needs attention rather than every check that ran. `INFO` and `NORMAL`-only sections (host `Uptime`, for instance) stay out of the way until you click the `INFO` or `NORMAL` button to bring them back, so nothing reads as an alert that isn't one. Clicking a sidebar entry whose section is hidden reveals **just that section** — it does not drop the whole report back to `All`. (The CSV stays complete and unfiltered for trending; open it in Excel and use AutoFilter on the Status column for the same effect.)
 
 **Sample report** (fictional lab data):
 
@@ -350,7 +360,7 @@ For every host, compares MTU across three layers per network path and flags wher
 - That same vSwitch/VDS vs. the **MTU reported by the physically connected switch port** (via CDP)
 - Untrusted/self-signed vCenter certificates are accepted by default (`-TrustAllCertificates`); pass `-TrustAllCertificates:$false` to require a valid chain.
 
-If CDP is disabled, or the connected switch only speaks LLDP, the CDP-vs-switch checks report `INFO` instead of guessing at a `PASS`/`FAIL`. Findings are tagged `PASS` / `WARN` / `FAIL` / `INFO`; the script never modifies configuration.
+If CDP is disabled, or the connected switch only speaks LLDP, the CDP-vs-switch checks report `INFO` instead of guessing at a `NORMAL`/`FAIL`. Findings are tagged `NORMAL` / `WARN` / `FAIL` / `INFO`; the script never modifies configuration.
 
 **Output.** Like the other reports, results are written to two timestamped files in `-ReportPath` (**defaults to the current directory**): `VMwareMtuConsistencyCheck-<yyyyMMdd-HHmmss>.html` and `.csv`, both with the columns **Category, Object, Check, Status, Detail**, produced in a `finally` block even if the run errors. The HTML report opens pre-filtered to `FAIL` + `WARN` with the same clickable status buttons and per-check sections as the health check.
 

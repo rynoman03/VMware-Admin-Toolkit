@@ -183,13 +183,13 @@ try {
     # always yielded null and every host reported INFO.
     $cert = Get-ResultRow $r.Rows 'esx01.fixture.local' 'CertificateExpiry'
     Assert-That 'host certificate expiry is evaluated, not reported as unavailable' `
-        ($cert.Count -eq 1 -and $cert[0].Status -eq 'PASS') "got $($cert.Count) row(s): $($cert.Status) - $($cert.Detail)"
+        ($cert.Count -eq 1 -and $cert[0].Status -eq 'NORMAL') "got $($cert.Count) row(s): $($cert.Status) - $($cert.Detail)"
 
     # The managing vCenter used to be parsed out of the host Uid, which breaks
     # for an administrator@vsphere.local style login.
     $ver = Get-ResultRow $r.Rows 'esx01.fixture.local' 'VersionVsVCenter'
     Assert-That 'host is matched to its managing vCenter' `
-        ($ver.Count -eq 1 -and $ver[0].Status -eq 'PASS') "got: $($ver.Status) - $($ver.Detail)"
+        ($ver.Count -eq 1 -and $ver[0].Status -eq 'NORMAL') "got: $($ver.Status) - $($ver.Detail)"
 
     # A stale IsoPath on a disconnected drive blocks nothing.
     $media = Get-ResultRow $r.Rows 'app01' 'MountedMedia'
@@ -199,23 +199,23 @@ try {
     # Reads MemoryTotalGB/MemoryUsageGB; a missing property makes the row vanish.
     Assert-That 'cluster RAM row is present' ((Get-ResultRow $r.Rows 'CL-FIXTURE' 'ClusterRAM').Count -eq 1)
     Assert-That 'storage paths are walked' `
-        ((Get-ResultRow $r.Rows 'esx01.fixture.local' 'PathState')[0].Status -eq 'PASS')
+        ((Get-ResultRow $r.Rows 'esx01.fixture.local' 'PathState')[0].Status -eq 'NORMAL')
 
     $svcOk = Get-ResultRow $r.Rows 'esx01.fixture.local' 'Services'
-    Assert-That 'all start-with-host services running is PASS' `
-        ($svcOk.Count -eq 1 -and $svcOk[0].Status -eq 'PASS') "got: $($svcOk.Status) - $($svcOk.Detail)"
+    Assert-That 'all start-with-host services running is NORMAL' `
+        ($svcOk.Count -eq 1 -and $svcOk[0].Status -eq 'NORMAL') "got: $($svcOk.Status) - $($svcOk.Detail)"
 
     $linkOk = Get-ResultRow $r.Rows 'esx01.fixture.local' 'NicLinkState'
-    Assert-That 'uplinks with link are PASS' `
-        ($linkOk.Count -eq 1 -and $linkOk[0].Status -eq 'PASS') "got: $($linkOk.Status) - $($linkOk.Detail)"
+    Assert-That 'uplinks with link are NORMAL' `
+        ($linkOk.Count -eq 1 -and $linkOk[0].Status -eq 'NORMAL') "got: $($linkOk.Status) - $($linkOk.Detail)"
     Assert-That 'an unassigned NIC with no cable is not reported as down' `
         ($linkOk.Count -eq 1 -and $linkOk[0].Detail -notmatch 'vmnic7') "got: $($linkOk.Detail)"
     $redOk = Get-ResultRow $r.Rows 'esx01.fixture.local' 'UplinkRedundancy'
-    Assert-That 'two live uplinks is PASS' `
-        ($redOk.Count -eq 1 -and $redOk[0].Status -eq 'PASS') "got: $($redOk.Status) - $($redOk.Detail)"
+    Assert-That 'two live uplinks is NORMAL' `
+        ($redOk.Count -eq 1 -and $redOk[0].Status -eq 'NORMAL') "got: $($redOk.Status) - $($redOk.Detail)"
     $dnsOk = Get-ResultRow $r.Rows 'esx01.fixture.local' 'DNS'
-    Assert-That 'configured DNS servers are PASS' `
-        ($dnsOk.Count -eq 1 -and $dnsOk[0].Status -eq 'PASS') "got: $($dnsOk.Status) - $($dnsOk.Detail)"
+    Assert-That 'configured DNS servers are NORMAL' `
+        ($dnsOk.Count -eq 1 -and $dnsOk[0].Status -eq 'NORMAL') "got: $($dnsOk.Status) - $($dnsOk.Detail)"
 
     # Inventory is read in bulk, so the number of API calls must depend on the
     # number of CONNECTIONS, not on how many hosts, LUNs or VMs there are.
@@ -249,7 +249,7 @@ try {
     # one, and every host silently reported INFO instead of a real policy.
     $pwOk = Get-ResultRow $r.Rows 'esx01.fixture.local' 'PasswordExpirationPolicy'
     Assert-That 'password policy resolves a real advanced setting, not INFO' `
-        ($pwOk.Count -eq 1 -and $pwOk[0].Status -eq 'PASS' -and $pwOk[0].Detail -match 'Security\.PasswordMaxDays') `
+        ($pwOk.Count -eq 1 -and $pwOk[0].Status -eq 'NORMAL' -and $pwOk[0].Detail -match 'Security\.PasswordMaxDays') `
         "got: $($pwOk.Status) - $($pwOk.Detail)"
 
     # -TrustAllCertificates is a [bool] defaulting to $true rather than a
@@ -327,9 +327,9 @@ try {
     Assert-That 'host exactly N majors behind vCenter is WARN, not FAIL' `
         ($ver.Count -eq 1 -and $ver[0].Status -eq 'WARN') "got: $($ver.Status) - $($ver.Detail)"
 
-    # An unparsable value used to fall through to PASS.
+    # An unparsable value used to fall through to NORMAL.
     $hw = Get-ResultRow $r.Rows 'app01' 'HardwareVersion'
-    Assert-That 'unparsable hardware version is INFO, not PASS' `
+    Assert-That 'unparsable hardware version is INFO, not NORMAL' `
         ($hw.Count -eq 1 -and $hw[0].Status -eq 'INFO') "got: $($hw.Status) - $($hw.Detail)"
 
     # A failed LUN query used to be reported as "NFS-only host" - a false all-clear.
@@ -351,10 +351,10 @@ try {
         ($ghost.Count -eq 1 -and -not [string]::IsNullOrWhiteSpace($ghost[0].Detail)) `
         "Detail was blank"
 
-    # $null is not $false: claiming PASS would report a clean result that was
+    # $null is not $false: claiming NORMAL would report a clean result that was
     # never actually checked.
     $ghostCons = Get-ResultRow $r.Rows 'ghost01' 'DiskConsolidation'
-    Assert-That 'unreadable consolidation state is INFO, not a false PASS' `
+    Assert-That 'unreadable consolidation state is INFO, not a false NORMAL' `
         ($ghostCons.Count -eq 1 -and $ghostCons[0].Status -eq 'INFO') `
         "got: $($ghostCons.Status) - $($ghostCons.Detail)"
 
@@ -453,7 +453,7 @@ try {
     )) {
         $ver = Get-ResultRow $r.Rows $pair.Host 'VersionVsVCenter'
         Assert-That "$($pair.Host) is paired with its own vCenter ($($pair.VC))" `
-            ($ver.Count -eq 1 -and $ver[0].Status -eq 'PASS' -and $ver[0].Detail -match [regex]::Escape($pair.VC)) `
+            ($ver.Count -eq 1 -and $ver[0].Status -eq 'NORMAL' -and $ver[0].Detail -match [regex]::Escape($pair.VC)) `
             "got: $($ver.Status) - $($ver.Detail)"
     }
 
