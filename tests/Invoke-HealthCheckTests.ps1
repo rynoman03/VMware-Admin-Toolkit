@@ -197,6 +197,15 @@ try {
     Assert-That 'storage paths are walked' `
         ((Get-ResultRow $r.Rows 'esx01.fixture.local' 'PathState')[0].Status -eq 'PASS')
 
+    # The stub only answers for advanced settings that exist on a real ESXi
+    # host, so this fails if the check asks for a setting name that doesn't.
+    # It shipped asking for 'Security.PasswordExpirationInDays', which isn't
+    # one, and every host silently reported INFO instead of a real policy.
+    $pwOk = Get-ResultRow $r.Rows 'esx01.fixture.local' 'PasswordExpirationPolicy'
+    Assert-That 'password policy resolves a real advanced setting, not INFO' `
+        ($pwOk.Count -eq 1 -and $pwOk[0].Status -eq 'PASS' -and $pwOk[0].Detail -match 'Security\.PasswordMaxDays') `
+        "got: $($pwOk.Status) - $($pwOk.Detail)"
+
     # -TrustAllCertificates is a [bool] defaulting to $true rather than a
     # [switch], because a switch defaulting to $true cannot be turned off by
     # its bare form. These two assert that the parameter actually reaches

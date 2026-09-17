@@ -79,6 +79,12 @@
     existing "servers configured and ntpd running" checks. Omit it and the
     check behaves as before.
 
+.PARAMETER PasswordMaxDaysWarn
+    Hosts whose Security.PasswordMaxDays is above this many days are WARN.
+    Default 365. VMware ships the setting at 99999, which is the "never
+    expires" sentinel rather than a real age limit, and that is always
+    flagged regardless of this value.
+
 .PARAMETER TrustAllCertificates
     Whether to ignore untrusted/self-signed vCenter TLS certificates when
     connecting (PowerCLI's InvalidCertificateAction). Default $true, since
@@ -250,6 +256,8 @@ param(
     # the right value, and for what setting a default changes.
     [string[]] $ExpectedSyslogServer,
     [string[]] $ExpectedNtpServer,
+
+    [int] $PasswordMaxDaysWarn      = 365,
 
     [bool] $TrustAllCertificates    = $true
 )
@@ -800,27 +808,33 @@ try {
         # Local account password expiration policy (root included). vCenter's API
         # doesn't expose a specific account's actual days-until-expiry - that lives
         # only in the host's local shadow file and would require SSH + `chage -l
-        # root` to read. This checks whether password aging is enabled at all.
+        # root` to read. Security.PasswordMaxDays is the host-wide maximum age a
+        # local password may reach, which is what vCenter does expose.
         try {
             # A name that doesn't exist comes back as no output (or a null)
             # rather than an error, and [int]$null is 0 - which would be
-            # reported below as "aging disabled" for a host we actually know
+            # reported below as a real value for a host we actually know
             # nothing about. Filter the nulls out before counting: @($null)
             # still has a Count of 1.
-            $pwExpSetting = @($h | Get-AdvancedSetting -Name 'Security.PasswordExpirationInDays' -ErrorAction Stop |
-                              Where-Object { $null -ne $_ -and $null -ne $_.Value })
-            if ($pwExpSetting.Count -ne 1) {
-                Add-Result 'HostHealth' $h.Name 'PasswordExpirationPolicy' 'INFO' 'Security.PasswordExpirationInDays not reported by this host'
+            $pwSetting = @($h | Get-AdvancedSetting -Name 'Security.PasswordMaxDays' -ErrorAction Stop |
+                           Where-Object { $null -ne $_ -and $null -ne $_.Value })
+            if ($pwSetting.Count -ne 1) {
+                Add-Result 'HostHealth' $h.Name 'PasswordExpirationPolicy' 'INFO' 'Security.PasswordMaxDays not reported by this host'
             } else {
-                $pwExpDays = [int]$pwExpSetting[0].Value
-                if ($pwExpDays -le 0) {
-                    Add-Result 'HostHealth' $h.Name 'PasswordExpirationPolicy' 'WARN' 'Security.PasswordExpirationInDays is 0 (disabled) - local account passwords, including root, never expire'
+                $pwMaxDays = [int]$pwSetting[0].Value
+                $pwNote    = "root's own remaining days aren't exposed by the vCenter API; that needs SSH and 'chage -l root'"
+                if ($pwMaxDays -ge 99999) {
+                    # 99999 is VMware's shipped default and its "never" sentinel,
+                    # not an age anyone chose - worth calling out as such.
+                    Add-Result 'HostHealth' $h.Name 'PasswordExpirationPolicy' 'WARN' "Security.PasswordMaxDays = $pwMaxDays - VMware's default, meaning local account passwords including root never expire ($pwNote)"
+                } elseif ($pwMaxDays -gt $PasswordMaxDaysWarn) {
+                    Add-Result 'HostHealth' $h.Name 'PasswordExpirationPolicy' 'WARN' "Security.PasswordMaxDays = $pwMaxDays days, above the $PasswordMaxDaysWarn-day threshold ($pwNote)"
                 } else {
-                    Add-Result 'HostHealth' $h.Name 'PasswordExpirationPolicy' 'PASS' "Security.PasswordExpirationInDays = $pwExpDays (root's actual remaining days isn't exposed by the vCenter API; requires SSH to check directly)"
+                    Add-Result 'HostHealth' $h.Name 'PasswordExpirationPolicy' 'PASS' "Security.PasswordMaxDays = $pwMaxDays days ($pwNote)"
                 }
             }
         } catch {
-            Add-Result 'HostHealth' $h.Name 'PasswordExpirationPolicy' 'INFO' "Could not read Security.PasswordExpirationInDays: $($_.Exception.Message)"
+            Add-Result 'HostHealth' $h.Name 'PasswordExpirationPolicy' 'INFO' "Could not read Security.PasswordMaxDays: $($_.Exception.Message)"
         }
 
         # Lockdown mode - Disabled means direct root/local logins to the host

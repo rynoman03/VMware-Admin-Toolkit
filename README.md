@@ -164,6 +164,15 @@ which also flag things that may be intentional) since enabling EVC is generally
 recommended even for same-generation clusters, as a hedge in case a differing host
 is added later.
 
+**Local account password expiration.** Reads `Security.PasswordMaxDays`, the
+host-wide maximum age a local password may reach. `WARN` at `99999` — VMware's
+shipped default and its "never expires" sentinel rather than an age anyone chose
+— or above `-PasswordMaxDaysWarn` (default 365); `PASS` below that; `INFO` if the
+host doesn't report the setting. A specific account's actual days-until-expiry
+(root's included) isn't exposed by the vCenter API at all — that lives in the
+host's shadow file and needs SSH and `chage -l root` — so the detail says so
+rather than implying the report has checked it.
+
 **ESXi build vs. vCenter build.** VMware only supports ESXi hosts within roughly two
 major versions behind vCenter, and a host *newer* than vCenter is unsupported outright
 and can break management features. `PASS` when a host's version matches vCenter's

@@ -211,7 +211,19 @@ function Get-AdvancedSetting {
         # Degraded: the setting is absent. The cmdlet returns nothing rather
         # than erroring, which is what used to read as "aging disabled".
         if ((Get-FixtureScenario) -eq 'Degraded') { return }
-        [pscustomobject]@{ Name = $Name; Value = 90 }
+
+        # Only answer for advanced settings that actually exist on ESXi. This
+        # stub used to echo back whatever -Name it was handed, which meant a
+        # setting name that does not exist on a real host still produced a
+        # value here and sailed through CI - exactly how the health check
+        # shipped asking for 'Security.PasswordExpirationInDays', which is not
+        # a real setting. An unknown name now returns nothing, like the real
+        # cmdlet does.
+        $known = @{
+            'Security.PasswordMaxDays' = 90
+        }
+        if (-not $known.ContainsKey($Name)) { return }
+        [pscustomobject]@{ Name = $Name; Value = $known[$Name] }
     }
 }
 
