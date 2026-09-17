@@ -197,6 +197,13 @@ try {
     Assert-That 'storage paths are walked' `
         ((Get-ResultRow $r.Rows 'esx01.fixture.local' 'PathState')[0].Status -eq 'PASS')
 
+    # The EVC detail spells the acronym out; that wording was lost in the same
+    # revert that took the ConnectionState fix.
+    $evcRow = @($r.Rows | Where-Object { $_.Check -eq 'EVC' })
+    Assert-That 'EVC detail explains the acronym' `
+        ($evcRow.Count -ge 1 -and $evcRow[0].Detail -match 'Enhanced vMotion Compatibility') `
+        "got: $($evcRow.Detail)"
+
     # The stub only answers for advanced settings that exist on a real ESXi
     # host, so this fails if the check asks for a setting name that doesn't.
     # It shipped asking for 'Security.PasswordExpirationInDays', which isn't
@@ -291,6 +298,26 @@ try {
     Assert-That 'failed LUN query is WARN, not a no-block-storage all-clear' `
         ($path.Count -eq 1 -and $path[0].Status -eq 'WARN' -and $path[0].Detail -notmatch 'NFS-only') `
         "got: $($path.Status) - $($path.Detail)"
+
+    # A healthy, powered-on VM whose Runtime.ConnectionState never comes back
+    # must be INFO, never FAIL. Reporting running VMs as failed - with a blank
+    # Detail, because "$null" stringifies to '' - was the original bug, and it
+    # regressed once when a later merge silently reverted the fix, so this is
+    # the guard against that happening again.
+    $ghost = Get-ResultRow $r.Rows 'ghost01' 'ConnectionState'
+    Assert-That 'unreadable connection state is INFO, not FAIL' `
+        ($ghost.Count -eq 1 -and $ghost[0].Status -eq 'INFO') `
+        "got: $($ghost.Status) - $($ghost.Detail)"
+    Assert-That 'unreadable connection state still explains itself' `
+        ($ghost.Count -eq 1 -and -not [string]::IsNullOrWhiteSpace($ghost[0].Detail)) `
+        "Detail was blank"
+
+    # $null is not $false: claiming PASS would report a clean result that was
+    # never actually checked.
+    $ghostCons = Get-ResultRow $r.Rows 'ghost01' 'DiskConsolidation'
+    Assert-That 'unreadable consolidation state is INFO, not a false PASS' `
+        ($ghostCons.Count -eq 1 -and $ghostCons[0].Status -eq 'INFO') `
+        "got: $($ghostCons.Status) - $($ghostCons.Detail)"
 
     # An absent advanced setting used to read as "password aging disabled".
     $pw = Get-ResultRow $r.Rows 'esx01.fixture.local' 'PasswordExpirationPolicy'

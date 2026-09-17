@@ -273,7 +273,7 @@ function Get-VM {
         # Degraded: a hardware version matching neither 'vmx-NN' nor a bare
         # number, which used to fall through to PASS.
         $hw = if ((Get-FixtureScenario) -eq 'Degraded') { 'unknown' } else { 'vmx-19' }
-        @([pscustomobject]@{
+        $vms = @([pscustomobject]@{
             Name          = 'app01'
             Uid           = '/VIServer=administrator@vsphere.local@vcenter.fixture.invalid:443/VirtualMachine=vm-101/'
             PowerState    = 'PoweredOn'
@@ -286,6 +286,30 @@ function Get-VM {
                 }
             }
         })
+
+        if ((Get-FixtureScenario) -eq 'Degraded') {
+            # A healthy, powered-on VM whose Runtime.ConnectionState and
+            # ConsolidationNeeded never come back. PowerCLI hands back a
+            # filtered property set, so these read as $null rather than as an
+            # error - and a $null that falls through to a FAIL catch-all is
+            # what reported running VMs as failed with a blank detail.
+            # UpdateViewData is a no-op here: the refresh succeeds but vCenter
+            # still has nothing to give, which must end as INFO, not FAIL.
+            $ghostRuntime = [pscustomobject]@{ ConnectionState = $null; ConsolidationNeeded = $null }
+            $ghostExt = [pscustomobject]@{
+                Runtime = $ghostRuntime
+                Guest   = [pscustomobject]@{ ToolsStatus = 'toolsOk'; Disk = @() }
+            }
+            $ghostExt | Add-Member -MemberType ScriptMethod -Name UpdateViewData -Value { param() } -Force
+            $vms += [pscustomobject]@{
+                Name            = 'ghost01'
+                Uid             = '/VIServer=administrator@vsphere.local@vcenter.fixture.invalid:443/VirtualMachine=vm-102/'
+                PowerState      = 'PoweredOn'
+                HardwareVersion = 'vmx-19'
+                ExtensionData   = $ghostExt
+            }
+        }
+        $vms
     }
 }
 
