@@ -201,6 +201,22 @@ try {
     Assert-That 'storage paths are walked' `
         ((Get-ResultRow $r.Rows 'esx01.fixture.local' 'PathState')[0].Status -eq 'PASS')
 
+    $svcOk = Get-ResultRow $r.Rows 'esx01.fixture.local' 'Services'
+    Assert-That 'all start-with-host services running is PASS' `
+        ($svcOk.Count -eq 1 -and $svcOk[0].Status -eq 'PASS') "got: $($svcOk.Status) - $($svcOk.Detail)"
+
+    $linkOk = Get-ResultRow $r.Rows 'esx01.fixture.local' 'NicLinkState'
+    Assert-That 'uplinks with link are PASS' `
+        ($linkOk.Count -eq 1 -and $linkOk[0].Status -eq 'PASS') "got: $($linkOk.Status) - $($linkOk.Detail)"
+    Assert-That 'an unassigned NIC with no cable is not reported as down' `
+        ($linkOk.Count -eq 1 -and $linkOk[0].Detail -notmatch 'vmnic7') "got: $($linkOk.Detail)"
+    $redOk = Get-ResultRow $r.Rows 'esx01.fixture.local' 'UplinkRedundancy'
+    Assert-That 'two live uplinks is PASS' `
+        ($redOk.Count -eq 1 -and $redOk[0].Status -eq 'PASS') "got: $($redOk.Status) - $($redOk.Detail)"
+    $dnsOk = Get-ResultRow $r.Rows 'esx01.fixture.local' 'DNS'
+    Assert-That 'configured DNS servers are PASS' `
+        ($dnsOk.Count -eq 1 -and $dnsOk[0].Status -eq 'PASS') "got: $($dnsOk.Status) - $($dnsOk.Detail)"
+
     # Inventory is read in bulk, so the number of API calls must depend on the
     # number of CONNECTIONS, not on how many hosts, LUNs or VMs there are.
     # Behavioural assertions alone would not notice a refactor that quietly
@@ -379,6 +395,37 @@ try {
     Assert-That 'datastore with unreadable Summary is not a false all-clear' `
         ($dsRow.Count -eq 1 -and $dsRow[0].Detail -notmatch 'All datastores accessible') `
         "got: $($dsRow.Status) - $($dsRow.Detail)"
+
+    # A service set to start with the host but stopped is the point of the
+    # check; a service with policy 'off' that is stopped was switched off on
+    # purpose and must not be reported as down.
+    $svc = Get-ResultRow $r.Rows 'esx01.fixture.local' 'Services'
+    Assert-That 'a stopped start-with-host service is WARN and named' `
+        ($svc.Count -eq 1 -and $svc[0].Status -eq 'WARN' -and $svc[0].Detail -match 'sfcbd-watchdog') `
+        "got: $($svc.Status) - $($svc.Detail)"
+    Assert-That 'a deliberately disabled service is not reported as down' `
+        ($svc.Count -eq 1 -and $svc[0].Detail -notmatch 'snmpd') `
+        "got: $($svc.Detail)"
+    Assert-That 'services with their own checks are not double-reported' `
+        ($svc.Count -eq 1 -and $svc[0].Detail -notmatch 'ntpd|TSM-SSH') `
+        "got: $($svc.Detail)"
+
+    # An assigned uplink with no link is a real finding; the spare NIC with no
+    # cable in it, on the same host, must stay out of the report.
+    $link = Get-ResultRow $r.Rows 'esx01.fixture.local' 'NicLinkState'
+    # One of two uplinks down: traffic still flows, so WARN not FAIL - the
+    # same grading PathState uses for a degraded-but-serving LUN.
+    Assert-That 'an uplink with no link, with one still up, is WARN and names the NIC' `
+        ($link.Count -eq 1 -and $link[0].Status -eq 'WARN' -and $link[0].Detail -match 'vmnic1') `
+        "got: $($link.Status) - $($link.Detail)"
+    Assert-That 'the spare NIC is still not reported' `
+        ($link.Count -eq 1 -and $link[0].Detail -notmatch 'vmnic7') "got: $($link.Detail)"
+
+    # Losing one of two uplinks also costs the redundancy.
+    $red = Get-ResultRow $r.Rows 'esx01.fixture.local' 'UplinkRedundancy'
+    Assert-That 'a switch down to one live uplink WARNs' `
+        ($red.Count -eq 1 -and $red[0].Status -eq 'WARN' -and $red[0].Detail -match 'vSwitch0') `
+        "got: $($red.Status) - $($red.Detail)"
 
     # An absent advanced setting used to read as "password aging disabled".
     $pw = Get-ResultRow $r.Rows 'esx01.fixture.local' 'PasswordExpirationPolicy'

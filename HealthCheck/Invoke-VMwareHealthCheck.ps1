@@ -4,7 +4,7 @@
 
 .DESCRIPTION
     Connects to one or more vCenter Servers and evaluates four areas:
-        1. Host health     - connection state, NTP, syslog, uptime, datastore connectivity, storage path state, TLS certificate expiry (hosts + vCenter), local account password expiration policy, ESXi build vs vCenter build, lockdown mode, SSH service state
+        1. Host health     - connection state, services set to start with the host, NIC link state, uplink redundancy, DNS, NTP, syslog, uptime, datastore connectivity, storage path state, TLS certificate expiry (hosts + vCenter), local account password expiration policy, ESXi build vs vCenter build, lockdown mode, SSH service state
         2. VM compliance   - connection state (orphaned/inaccessible VMs), disk consolidation needed, VMware Tools, VM hardware version, mounted ISOs, floppy drives, snapshot age
         3. Capacity        - datastore free space, cluster CPU/RAM utilization
         4. Cluster config  - HA / DRS / admission control
@@ -582,6 +582,7 @@ try {
         'Config.Product', 'Config.Certificate', 'Config.LockdownMode',
         'Config.Service.Service', 'Config.DateTimeInfo.NtpConfig.Server',
         'Config.Option', 'Config.StorageDevice.ScsiLun', 'Config.StorageDevice.MultipathInfo',
+        'Config.Network',
         'Summary.Hardware', 'Summary.QuickStats'
     )
 
@@ -831,6 +832,89 @@ try {
             Add-Result 'HostHealth' $hName 'PathState' 'INFO' 'No block storage LUNs found (e.g. NFS-only host)'
         }
 
+        # ---- Network ---------------------------------------------------
+        # Config.Network came with the host view, so all of this is free.
+        $net = $hv.Config.Network
+        if ($null -eq $net) {
+            Add-Result 'HostHealth' $hName 'NicLinkState' 'INFO' 'Network configuration not reported by vCenter for this host'
+        } else {
+            # Map pNIC key -> device name and link state once, then read the
+            # switches through it.
+            $pnicByKey = @{}
+            foreach ($pnic in @($net.Pnic)) {
+                if ($pnic) { $pnicByKey[[string]$pnic.Key] = $pnic }
+            }
+
+            # Uplinks assigned to a switch, grouped by the switch they serve.
+            $switches = New-Object System.Collections.Generic.List[object]
+            foreach ($vsw in @($net.Vswitch)) {
+                if ($vsw) { $switches.Add([pscustomobject]@{ Name = $vsw.Name; Keys = @($vsw.Pnic) }) }
+            }
+            foreach ($psw in @($net.ProxySwitch)) {
+                if ($psw) { $switches.Add([pscustomobject]@{ Name = $psw.DvsName; Keys = @($psw.Pnic) }) }
+            }
+
+            # A pNIC with no LinkSpeed has no link. Only ASSIGNED uplinks are
+            # reported: an unused NIC with no cable in it is normal, and
+            # flagging every one of those would bury the real finding.
+            # Graded the way PathState is: losing an uplink while the switch
+            # still has another is a redundancy loss, not an outage. Only a
+            # switch with NO uplinks left carrying link is a FAIL - that
+            # switch's traffic is actually down.
+            $downUplinks   = New-Object System.Collections.Generic.List[object]
+            $deadSwitches  = New-Object System.Collections.Generic.List[object]
+            $thinSwitches  = New-Object System.Collections.Generic.List[object]
+            foreach ($sw in $switches) {
+                $up = 0
+                foreach ($k in $sw.Keys) {
+                    $pnic = $pnicByKey[[string]$k]
+                    if ($null -eq $pnic) { continue }
+                    if ($null -eq $pnic.LinkSpeed) {
+                        $downUplinks.Add("$($pnic.Device) on $($sw.Name)")
+                    } else {
+                        $up++
+                    }
+                }
+                if ($sw.Keys.Count -eq 0) { continue }
+                if ($up -eq 0) {
+                    $deadSwitches.Add("$($sw.Name) (0 of $($sw.Keys.Count) uplink(s) up)")
+                } elseif ($up -lt 2) {
+                    $thinSwitches.Add("$($sw.Name) ($up of $($sw.Keys.Count) uplink(s) up)")
+                }
+            }
+
+            if ($switches.Count -eq 0) {
+                Add-Result 'HostHealth' $hName 'NicLinkState' 'INFO' 'No virtual switches reported for this host'
+            } elseif ($deadSwitches.Count -gt 0) {
+                Add-Result 'HostHealth' $hName 'NicLinkState' 'FAIL' "Switch(es) with no uplink carrying link: $($deadSwitches -join ', ') - that traffic is down; check the cables and physical switch ports"
+            } elseif ($downUplinks.Count -gt 0) {
+                Add-Result 'HostHealth' $hName 'NicLinkState' 'WARN' "Uplink(s) with no link: $($downUplinks -join ', ') - still carrying traffic on the remaining uplink(s); check the cable and the physical switch port"
+            } else {
+                Add-Result 'HostHealth' $hName 'NicLinkState' 'PASS' "All assigned uplinks have link across $($switches.Count) switch(es)"
+            }
+
+            # Fewer than two live uplinks means one cable, NIC or switch port
+            # takes the host's traffic down with it.
+            if ($switches.Count -gt 0) {
+                if ($thinSwitches.Count -gt 0) {
+                    Add-Result 'HostHealth' $hName 'UplinkRedundancy' 'WARN' "No uplink redundancy on: $($thinSwitches -join ', ') - a single cable, NIC or switch port failure takes this traffic down"
+                } else {
+                    Add-Result 'HostHealth' $hName 'UplinkRedundancy' 'PASS' "Every switch has at least two uplinks with link"
+                }
+            }
+
+            # DNS - a host that can't resolve names fails vCenter operations,
+            # NTP by hostname and syslog by hostname in confusing ways.
+            $dns = @($net.DnsConfig.Address)
+            if ($null -eq $net.DnsConfig) {
+                Add-Result 'HostHealth' $hName 'DNS' 'INFO' 'DNS configuration not reported by vCenter for this host'
+            } elseif ($dns.Count -eq 0) {
+                Add-Result 'HostHealth' $hName 'DNS' 'WARN' 'No DNS servers configured - name resolution failures show up as confusing errors elsewhere'
+            } else {
+                Add-Result 'HostHealth' $hName 'DNS' 'PASS' "Servers: $($dns -join ', ')"
+            }
+        }
+
         # ESXi host TLS certificate expiry. Config.Certificate is a byte[] of
         # the PEM-encoded certificate, not a certificate object, so reading
         # .NotAfter off it directly always yields $null - it has to be decoded
@@ -893,6 +977,32 @@ try {
             'lockdownNormal'   { Add-Result 'HostHealth' $hName 'LockdownMode' 'PASS' 'Normal' }
             'lockdownStrict'   { Add-Result 'HostHealth' $hName 'LockdownMode' 'PASS' 'Strict' }
             default            { Add-Result 'HostHealth' $hName 'LockdownMode' 'INFO' "Could not read lockdown mode ($lockdown)" }
+        }
+
+        # Host services that are set to start with the host but aren't running.
+        # Policy is what makes this safe to report: a service with policy
+        # 'off' that is stopped was turned off on purpose and is not a
+        # finding, so only 'on' (start/stop with host) and 'automatic' count.
+        # Without that distinction this would flag every optional daemon on
+        # every host.
+        # ntpd and TSM-SSH have their own checks, so they are left out here
+        # rather than reported twice.
+        $svcExcluded = @('ntpd', 'TSM-SSH')
+        $svcManaged  = @($hostServices | Where-Object {
+            $_ -and $_.Key -notin $svcExcluded -and ([string]$_.Policy -in @('on', 'automatic'))
+        })
+        $svcDown = @($svcManaged | Where-Object { -not $_.Running })
+        if ($hostServices.Count -eq 0) {
+            Add-Result 'HostHealth' $hName 'Services' 'INFO' 'Host service list not reported by vCenter for this host'
+        } elseif ($svcManaged.Count -eq 0) {
+            Add-Result 'HostHealth' $hName 'Services' 'INFO' 'No services are set to start with the host'
+        } elseif ($svcDown.Count -gt 0) {
+            $svcNames = ($svcDown | ForEach-Object {
+                if ($_.Label) { "$($_.Label) ($($_.Key))" } else { "$($_.Key)" }
+            }) -join ', '
+            Add-Result 'HostHealth' $hName 'Services' 'WARN' "$($svcDown.Count) of $($svcManaged.Count) service(s) set to start with the host are stopped: $svcNames"
+        } else {
+            Add-Result 'HostHealth' $hName 'Services' 'PASS' "All $($svcManaged.Count) service(s) set to start with the host are running"
         }
 
         # SSH (TSM-SSH) service - often enabled temporarily for troubleshooting
