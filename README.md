@@ -44,6 +44,10 @@ $cred = Get-Credential
 
 # Echo every NORMAL/INFO row to the console as well, the way older versions did
 .\HealthCheck\Invoke-VMwareHealthCheck.ps1 -VCenter vcenter01.corp.local -ShowAllConsoleOutput
+
+# Flag anything behind your standard build (not needed if you use vLCM baselines)
+.\HealthCheck\Invoke-VMwareHealthCheck.ps1 -VCenter vcenter01.corp.local `
+    -ExpectedEsxiBuild 24859861 -ExpectedVCenterBuild 24322831
 ```
 
 By default, untrusted/self-signed vCenter certificates are accepted so the script
@@ -63,6 +67,7 @@ The script checks:
 - **VM compliance** — connection state (orphaned/inaccessible VMs), disk consolidation needed, VMware Tools, OS system drive free space (`C:\` / `/`, as a **percentage** of the volume), all other guest drives, VM hardware version, mounted ISOs/CD-ROMs, connected floppy drives, snapshot age
 - **Capacity** — datastore free space, cluster CPU/RAM utilization
 - **Cluster config** — HA, admission control, DRS, EVC
+- **Updates** — whether an ESXi host is behind its vLCM/Update Manager patch baselines, or behind a build you specify; vCenter's own version and build
 
 **Syslog & NTP baselines (`-ExpectedSyslogServer` / `-ExpectedNtpServer`).** By
 default these two checks only answer "is *anything* configured?" — which passes a
@@ -173,6 +178,41 @@ off.
 A cluster whose EVC mode vCenter doesn't report is also `INFO`, with a
 different detail (`not reported by vCenter`), so "off" and "couldn't tell" are
 never conflated.
+
+**Updates.** Whether anything is behind. *"Is an update available"* has no single
+source of truth in the vSphere API, so this section always says **where** its
+verdict came from rather than implying an authority it doesn't have.
+
+Two sources, in priority order:
+
+1. **vSphere Lifecycle Manager / Update Manager baseline compliance.** If your
+   hosts have a patch baseline attached, nothing needs configuring — the section
+   reports each host against the baselines your organization already maintains,
+   and stays correct without anyone editing this script. `WARN` when a host is
+   non-compliant (naming the baselines), `WARN` when it's *incompatible* (the
+   update can't be applied as-is), `NORMAL` when it's compliant with all of
+   them, and `INFO` when baselines are attached but have never been scanned —
+   which is deliberately not a `NORMAL`, since nothing was actually checked.
+   Read in **one** `Get-Compliance` call for every host, not one per host.
+2. **A build number you supply**, for estates that don't use baselines:
+   `-ExpectedEsxiBuild` and `-ExpectedVCenterBuild`. Used only for hosts vLCM
+   can't answer for — where a baseline exists, the baseline wins, because it's
+   what your organization decided "current" means.
+
+Omit both and the section still lists every build, it just doesn't judge them
+(`INFO`, saying so). A host **ahead** of the expected build is `INFO`, not
+`WARN` — worth knowing, but not a missing update. Builds are compared as
+numbers, so `22380479` vs `9214924` doesn't get ordered as text.
+
+Two things this deliberately does **not** do:
+
+- **No hardcoded table of current VMware builds.** One existed and was removed:
+  it's wrong the day Broadcom ships anything, and a stale table reporting "up to
+  date" is worse than reporting nothing.
+- **No query to the vCenter appliance service on port 5480.** That's the only
+  place vCenter's own "updates available" list actually lives, but it's a
+  separate endpoint with its own credentials and its own firewall path. The
+  script compares the build it can already see instead.
 
 **Guest drive thresholds are percentages.** `-OSDriveFreeWarnPercent` (default
 15) and `-DataDriveFreeWarnPercent` (default 10) flag a volume by how full it

@@ -318,6 +318,15 @@ function New-FixtureSnapshotNode {
 function Get-FixtureHostView {
     param($Server)
     switch (Get-FixtureScenario) {
+        'VlcmBaselines' {
+            # Three hosts so all three baseline verdicts appear in one run:
+            # host-1 non-compliant, host-2 compliant, host-3 never scanned.
+            @(
+                (New-FixtureHostView -Name 'esx01.fixture.local' -MoRef 'HostSystem-host-1')
+                (New-FixtureHostView -Name 'esx02.fixture.local' -MoRef 'HostSystem-host-2')
+                (New-FixtureHostView -Name 'esx03.fixture.local' -MoRef 'HostSystem-host-3')
+            )
+        }
         'HostDown' {
             @(
                 (New-FixtureHostView -Name 'esx01.fixture.local' -MoRef 'HostSystem-host-1')
@@ -369,11 +378,15 @@ function Get-FixtureVmView {
     # assert the other half of the contract: when nothing has a snapshot, the
     # sizing calls do not happen at all.
     if ((Get-FixtureScenario) -ne 'MultiVCenter') {
+        # Two roots, one with a child, and two of the three carrying a size:
+        # a fixture that returns a single row lets a stub bug that collapses
+        # the result set into one object pass unnoticed.
         $vms += New-FixtureVmView -Name 'snapvm01' -MoRef 'VirtualMachine-vm-201' -Snapshot ([pscustomobject]@{
             RootSnapshotList = @(
                 New-FixtureSnapshotNode -Name 'before-patching' -AgeDays 45 -Children @(
                     New-FixtureSnapshotNode -Name 'after-patching' -AgeDays 1
                 )
+                New-FixtureSnapshotNode -Name 'pre-upgrade' -AgeDays 90
             )
         })
     }
@@ -383,7 +396,7 @@ function Get-FixtureVmView {
 # Snapshot sizes the stub's Get-Snapshot hands back, by snapshot name. Only
 # the root has a size here, so the report still has to cope with a snapshot
 # whose size it cannot resolve.
-$script:FixtureSnapshotSizes = @{ 'before-patching' = 12.5 }
+$script:FixtureSnapshotSizes = @{ 'before-patching' = 12.5; 'pre-upgrade' = 3.5 }
 
 function Get-FixtureClusterView {
     $clusters = @([pscustomobject]@{
@@ -544,7 +557,11 @@ function Get-Snapshot {
             })
         }
     }
-    , $out.ToArray()
+    # Output the elements, not the collection: ', $out.ToArray()' emits the
+    # array as a single object, and @(...) at the call site then wraps it
+    # instead of unrolling it - every property read back as an array of all
+    # the rows' values at once.
+    $out.ToArray()
 }
 
 function Get-FixtureSnapshotFlat {
@@ -556,5 +573,45 @@ function Get-FixtureSnapshotFlat {
     }
 }
 
-Export-ModuleMember -Function Set-PowerCLIConfiguration, Connect-VIServer, Disconnect-VIServer,
-    Get-View, Get-VM, Get-Snapshot
+# vSphere Lifecycle Manager / Update Manager. This ships with PowerCLI but is
+# not present in every install, and estates that don't use baselines have
+# nothing for it to read - so the health check probes for it with Get-Command
+# rather than assuming it. That probe is itself worth testing in both states,
+# so the stub only offers Get-Compliance in the scenario that asks for it; in
+# every other scenario Get-Command finds nothing, which is the no-vLCM path.
+function Get-Compliance {
+    [CmdletBinding()]
+    param($Entity)
+    Write-FixtureCall 'Get-Compliance'
+    $out = New-Object System.Collections.Generic.List[object]
+    foreach ($e in @($Entity)) {
+        $k = "$e"
+        # host-1 is behind its patch baseline, host-2 is compliant with both
+        # of its own. host-3 has baselines attached that were never scanned.
+        switch ($k) {
+            'HostSystem-host-1' {
+                $out.Add([pscustomobject]@{ Entity = $k; Status = 'NonCompliant'; Baseline = [pscustomobject]@{ Name = 'Critical Host Patches' } })
+                $out.Add([pscustomobject]@{ Entity = $k; Status = 'Compliant';    Baseline = [pscustomobject]@{ Name = 'Non-Critical Host Patches' } })
+            }
+            'HostSystem-host-2' {
+                $out.Add([pscustomobject]@{ Entity = $k; Status = 'Compliant'; Baseline = [pscustomobject]@{ Name = 'Critical Host Patches' } })
+                $out.Add([pscustomobject]@{ Entity = $k; Status = 'Compliant'; Baseline = [pscustomobject]@{ Name = 'Non-Critical Host Patches' } })
+            }
+            'HostSystem-host-3' {
+                $out.Add([pscustomobject]@{ Entity = $k; Status = 'Unknown'; Baseline = [pscustomobject]@{ Name = 'Critical Host Patches' } })
+            }
+        }
+    }
+    # Output the elements, not the collection: ', $out.ToArray()' emits the
+    # array as a single object, and @(...) at the call site then wraps it
+    # instead of unrolling it - every property read back as an array of all
+    # the rows' values at once.
+    $out.ToArray()
+}
+
+$exported = @(
+    'Set-PowerCLIConfiguration', 'Connect-VIServer', 'Disconnect-VIServer',
+    'Get-View', 'Get-VM', 'Get-Snapshot'
+)
+if ((Get-FixtureScenario) -eq 'VlcmBaselines') { $exported += 'Get-Compliance' }
+Export-ModuleMember -Function $exported

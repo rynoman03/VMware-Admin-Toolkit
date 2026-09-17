@@ -256,8 +256,14 @@ try {
     # The snapshot tree is walked recursively, so a snapshot nested under
     # another is reported rather than only the root.
     $snapRows = @($r.Rows | Where-Object { $_.Object -eq 'snapvm01' -and $_.Check -eq 'Snapshot' })
-    Assert-That 'nested snapshots are reported, not just the root' `
-        ($snapRows.Count -eq 2) "got $($snapRows.Count) row(s): $($snapRows.Detail -join ' | ')"
+    Assert-That 'every snapshot in the tree is reported, roots and children' `
+        ($snapRows.Count -eq 3) "got $($snapRows.Count) row(s): $($snapRows.Detail -join ' | ')"
+    # Two of the three carry a size. A stub or a lookup that collapses the
+    # result set into one row would size at most one of them.
+    Assert-That 'each snapshot gets its own size, not the first one repeated' `
+        (@($snapRows | Where-Object { $_.Detail -match '12\.5GB' }).Count -eq 1 -and
+         @($snapRows | Where-Object { $_.Detail -match '3\.5GB' }).Count -eq 1) `
+        "got: $(($snapRows | ForEach-Object { $_.Detail }) -join ' | ')"
     $oldSnap = @($snapRows | Where-Object { $_.Detail -match 'before-patching' })
     Assert-That 'a snapshot past the age threshold is WARN and carries its size' `
         ($oldSnap.Count -eq 1 -and $oldSnap[0].Status -eq 'WARN' -and $oldSnap[0].Detail -match '45d, 12\.5GB') `
@@ -498,6 +504,79 @@ try {
     Assert-That 'no snapshots anywhere means no sizing calls at all' `
         (@($r.Calls | Where-Object { $_ -like 'Get-VM*' -or $_ -eq 'Get-Snapshot' }).Count -eq 0) `
         "got: $($r.Calls -join ', ')"
+
+    # --- Updates ------------------------------------------------------------
+    # "Is an update available" has no single source of truth in the vSphere
+    # API, so the section has to be explicit about which source produced each
+    # verdict - and must never imply an authority it doesn't have.
+    Write-Host "`nScenario: Updates (no vLCM, no expected builds)" -ForegroundColor Cyan
+    $r = Invoke-Scenario 'Healthy' -Label 'UpdatesBare'
+    Assert-That 'exits 0' ($r.ExitCode -eq 0) "exit code was $($r.ExitCode)"
+    $vcRow = @($r.Rows | Where-Object { $_.Check -eq 'VCenterBuild' })
+    Assert-That 'vCenter build is reported even with nothing to compare against' `
+        ($vcRow.Count -eq 1 -and $vcRow[0].Status -eq 'INFO' -and $vcRow[0].Detail -match 'build 22617221') `
+        "got: $($vcRow.Status) - $($vcRow.Detail)"
+    $esxRows = @($r.Rows | Where-Object { $_.Check -eq 'EsxiPatchLevel' })
+    Assert-That 'every host reports a build' ($esxRows.Count -eq 2) "got $($esxRows.Count)"
+    # An unjudged build must never read as an up-to-date one.
+    Assert-That 'an uncompared build is INFO, never a false NORMAL' `
+        (@($esxRows | Where-Object { $_.Status -ne 'INFO' }).Count -eq 0) `
+        "got: $(($esxRows | ForEach-Object { $_.Status }) -join ', ')"
+    Assert-That 'and says why it was not compared' `
+        ($esxRows[0].Detail -match 'not been compared against anything') "got: $($esxRows[0].Detail)"
+    Assert-That 'no Lifecycle Manager call when the module is absent' `
+        (@($r.Calls | Where-Object { $_ -eq 'Get-Compliance' }).Count -eq 0) `
+        "got: $($r.Calls -join ', ')"
+
+    Write-Host "`nScenario: Updates (expected builds supplied)" -ForegroundColor Cyan
+    $r = Invoke-Scenario 'Healthy' -Label 'UpdatesBuilds' `
+        -ExtraArgs @('-ExpectedEsxiBuild', '24859861', '-ExpectedVCenterBuild', '24322831')
+    $vcRow = @($r.Rows | Where-Object { $_.Check -eq 'VCenterBuild' })
+    Assert-That 'vCenter behind the expected build is WARN' `
+        ($vcRow.Count -eq 1 -and $vcRow[0].Status -eq 'WARN') "got: $($vcRow.Status) - $($vcRow.Detail)"
+    $esxRows = @($r.Rows | Where-Object { $_.Check -eq 'EsxiPatchLevel' })
+    Assert-That 'hosts behind the expected build are WARN' `
+        (@($esxRows | Where-Object { $_.Status -eq 'WARN' }).Count -eq 2) `
+        "got: $(($esxRows | ForEach-Object { $_.Status }) -join ', ')"
+
+    # A host AHEAD of the standard is worth knowing about, but it is not a
+    # missing update - reporting it as one would put a permanent WARN on every
+    # host that got patched early.
+    Write-Host "`nScenario: Updates (host ahead of the expected build)" -ForegroundColor Cyan
+    $r = Invoke-Scenario 'Healthy' -Label 'UpdatesAhead' -ExtraArgs @('-ExpectedEsxiBuild', '1000')
+    $esxRows = @($r.Rows | Where-Object { $_.Check -eq 'EsxiPatchLevel' })
+    Assert-That 'a host newer than the expected build is INFO, not WARN' `
+        (@($esxRows | Where-Object { $_.Status -eq 'INFO' -and $_.Detail -match 'NEWER' }).Count -eq 2) `
+        "got: $(($esxRows | ForEach-Object { "$($_.Status) $($_.Detail)" }) -join ' | ')"
+    # 22380479 vs 1000 compares the wrong way round as text.
+    Assert-That 'builds are compared as numbers, not as strings' `
+        (@($esxRows | Where-Object { $_.Status -eq 'WARN' }).Count -eq 0) `
+        "got: $(($esxRows | ForEach-Object { $_.Status }) -join ', ')"
+
+    # Where baselines exist they ARE the answer, and -ExpectedEsxiBuild must
+    # not override them: the baseline is what this organisation decided
+    # 'current' means, and it stays right with nobody editing the script.
+    Write-Host "`nScenario: Updates (vLCM baselines attached)" -ForegroundColor Cyan
+    $r = Invoke-Scenario 'VlcmBaselines' -ExtraArgs @('-ExpectedEsxiBuild', '22380479')
+    Assert-That 'Lifecycle Manager is asked once for every host, not once per host' `
+        (@($r.Calls | Where-Object { $_ -eq 'Get-Compliance' }).Count -eq 1) `
+        "got: $($r.Calls -join ', ')"
+    $nonComp = Get-ResultRow $r.Rows 'esx01.fixture.local' 'EsxiPatchLevel'
+    Assert-That 'a host failing a baseline is WARN and names the baseline' `
+        ($nonComp.Count -eq 1 -and $nonComp[0].Status -eq 'WARN' -and $nonComp[0].Detail -match 'Critical Host Patches') `
+        "got: $($nonComp.Status) - $($nonComp.Detail)"
+    $comp = Get-ResultRow $r.Rows 'esx02.fixture.local' 'EsxiPatchLevel'
+    Assert-That 'a host compliant with every baseline is NORMAL' `
+        ($comp.Count -eq 1 -and $comp[0].Status -eq 'NORMAL') "got: $($comp.Status) - $($comp.Detail)"
+    $unscanned = Get-ResultRow $r.Rows 'esx03.fixture.local' 'EsxiPatchLevel'
+    Assert-That 'baselines attached but never scanned is INFO, not a false NORMAL' `
+        ($unscanned.Count -eq 1 -and $unscanned[0].Status -eq 'INFO' -and $unscanned[0].Detail -match 'not been scanned') `
+        "got: $($unscanned.Status) - $($unscanned.Detail)"
+    # esx01 matches -ExpectedEsxiBuild exactly, so a build comparison would
+    # have called it NORMAL. The baseline says otherwise and must win.
+    Assert-That 'the baseline verdict beats a matching -ExpectedEsxiBuild' `
+        ($nonComp.Count -eq 1 -and $nonComp[0].Detail -notmatch 'expected build') `
+        "got: $($nonComp.Detail)"
 
     # --- ConnectFail --------------------------------------------------------
     Write-Host "`nScenario: ConnectFail" -ForegroundColor Cyan
