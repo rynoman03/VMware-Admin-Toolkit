@@ -41,6 +41,9 @@ $cred = Get-Credential
 .\HealthCheck\Invoke-VMwareHealthCheck.ps1 -VCenter vcenter01.corp.local `
     -ExpectedSyslogServer 'udp://loghost01.corp.local:514' `
     -ExpectedNtpServer 10.10.0.10,10.10.0.11
+
+# Echo every NORMAL/INFO row to the console as well, the way older versions did
+.\HealthCheck\Invoke-VMwareHealthCheck.ps1 -VCenter vcenter01.corp.local -ShowAllConsoleOutput
 ```
 
 By default, untrusted/self-signed vCenter certificates are accepted so the script
@@ -266,13 +269,29 @@ the work after that is local. The old shape cost roughly one call per host for
 services, NTP, syslog and advanced settings, plus **one per LUN** for path
 state, so a host with 40 LUNs alone was 45+ round-trips.
 
+The one thing the view layout doesn't expose is snapshot **size**, so that
+still needs PowerCLI objects — but only for the VMs that actually have a
+snapshot, which the views already identify. On an estate where a handful of
+VMs hold snapshots that is a lookup of a handful of VMs, and where none do the
+call is skipped entirely, instead of retrieving every VM in the inventory to
+size nothing.
+
 | Inventory | Estimate |
 |-----------|----------|
 | ~25 VMs / 2-3 hosts | seconds |
 | ~150 VMs | well under a minute |
 | 500+ VMs | a minute or two |
 
-Add ~10-30s for the initial PowerCLI module import. As long as `NORMAL`/`WARN` lines keep printing, it's working — not hung.
+Add ~10-30s for the initial PowerCLI module import.
+
+**Console output.** Only `FAIL` and `WARN` rows are echoed to the console while
+the run is in progress, with a count of what was withheld at the end. On a real
+estate `NORMAL` and `INFO` are the large majority of rows: printing them scrolls
+the findings worth reading off the screen, and console rendering is one of the
+slowest things the script does. Pass `-ShowAllConsoleOutput` to print every row
+as before. This changes the console only — the HTML and CSV reports always
+contain every row either way. A progress bar shows which host or VM is being
+checked, so a long run is visibly working rather than apparently hung.
 
 **Output.** Everything printed to the console is also written to two timestamped files in `-ReportPath` (**defaults to the current directory** if not specified):
 

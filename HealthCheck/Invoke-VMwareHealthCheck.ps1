@@ -60,6 +60,14 @@
     newer than vCenter is always FAIL regardless of this value, since that's
     unsupported outright. Default 2.
 
+.PARAMETER ShowAllConsoleOutput
+    Echo every NORMAL and INFO row to the console as it is found, the way the
+    script used to. Off by default: on a real estate those rows are the large
+    majority, writing them is one of the slowest things the script does, and
+    they scroll the FAIL and WARN lines - the ones worth watching for - off
+    the screen. Everything is in the HTML and CSV reports either way; this
+    only controls what the console shows while the run is in progress.
+
 .PARAMETER ExpectedSyslogServer
     Optional baseline of the remote syslog target(s) every host is supposed to
     be pointing at, e.g. -ExpectedSyslogServer 'udp://loghost01.corp.local:514'.
@@ -261,13 +269,44 @@ param(
 
     [int] $PasswordMaxDaysWarn      = 365,
 
-    [bool] $TrustAllCertificates    = $true
+    [bool] $TrustAllCertificates    = $true,
+
+    [switch] $ShowAllConsoleOutput
 )
 
 #region --- Setup -------------------------------------------------------------
 
 # Collected results. Each row: Category, Object, Check, Status (NORMAL/WARN/FAIL/INFO), Detail
 $script:Results = New-Object System.Collections.Generic.List[object]
+$script:ShowAllRows = [bool]$ShowAllConsoleOutput
+$script:QuietRows   = 0
+$script:LastProgressTick = 0
+$script:ProgressClock    = $null
+$script:HostOptionIndex = @{}   # host MoRef -> (advanced setting name -> value)
+
+# A progress bar for the long loops. Write-Progress updates in place rather
+# than scrolling, and is a no-op when output is redirected, so it reassures an
+# operator watching a 300-host run without adding a line to any log. Refreshed
+# at most every 250ms: redrawing it per object was itself measurable.
+function Write-HealthCheckProgress {
+    param(
+        [string] $Activity,
+        [int]    $Current,
+        [int]    $Total,
+        [string] $Item
+    )
+    if ($Total -le 0) { return }
+    # A Stopwatch rather than [Environment]::TickCount: TickCount wraps to
+    # Int32.MinValue after ~24.9 days of uptime, and a negative delta would
+    # read as "too soon" and freeze the bar for the rest of the run.
+    if ($null -eq $script:ProgressClock) { $script:ProgressClock = [Diagnostics.Stopwatch]::StartNew() }
+    $now = $script:ProgressClock.ElapsedMilliseconds
+    if ($Current -lt $Total -and ($now - $script:LastProgressTick) -lt 250) { return }
+    $script:LastProgressTick = $now
+    Write-Progress -Activity $Activity -Status "$Current of $Total - $Item" `
+        -PercentComplete ([math]::Min(100, [int](($Current / [double]$Total) * 100)))
+    if ($Current -ge $Total) { Write-Progress -Activity $Activity -Completed }
+}
 
 function Add-Result {
     param(
@@ -284,13 +323,22 @@ function Add-Result {
         Status   = $Status
         Detail   = $Detail
     })
-    $color = switch ($Status) {
-        'NORMAL' { 'Green' }
-        'WARN' { 'Yellow' }
-        'FAIL' { 'Red' }
-        default { 'Gray' }
+    # FAIL and WARN always print - they are the reason someone is watching the
+    # run. NORMAL and INFO are counted instead of printed unless asked for:
+    # they are the bulk of the rows, and writing each one to the console is
+    # among the most expensive things the script does (console rendering, not
+    # the check itself). Nothing is lost - every row is in both reports.
+    if ($Status -eq 'FAIL' -or $Status -eq 'WARN' -or $script:ShowAllRows) {
+        $color = switch ($Status) {
+            'NORMAL' { 'Green' }
+            'WARN' { 'Yellow' }
+            'FAIL' { 'Red' }
+            default { 'Gray' }
+        }
+        Write-Host ("[{0,-4}] {1,-12} {2,-28} {3} - {4}" -f $Status, $Category, $Object, $Check, $Detail) -ForegroundColor $color
+    } else {
+        $script:QuietRows++
     }
-    Write-Host ("[{0,-4}] {1,-12} {2,-28} {3} - {4}" -f $Status, $Category, $Object, $Check, $Detail) -ForegroundColor $color
 }
 
 # Normalizes one syslog/NTP target into a comparable host + port pair.
@@ -426,11 +474,21 @@ function Get-HostOptionValue {
         [object] $HostView,
         [string] $Name
     )
-    $opts = $HostView.Config.Option
-    if ($null -eq $opts) { return $null }
-    foreach ($o in $opts) {
-        if ($o.Key -eq $Name) { return $o.Value }
+    # Config.Option carries every advanced setting on the host - well over a
+    # thousand entries on a current ESXi build - so it is indexed once per
+    # host and cached against the host's MoRef. Scanning the array per lookup
+    # meant a full linear walk for each setting the script asks about.
+    if ($null -eq $script:HostOptionIndex) { $script:HostOptionIndex = @{} }
+    $moRef = "$($HostView.MoRef)"
+    $index = $script:HostOptionIndex[$moRef]
+    if ($null -eq $index) {
+        $index = @{}
+        foreach ($o in @($HostView.Config.Option)) {
+            if ($o -and $null -ne $o.Key) { $index[[string]$o.Key] = $o.Value }
+        }
+        $script:HostOptionIndex[$moRef] = $index
     }
+    if ($index.ContainsKey($Name)) { return $index[$Name] }
     return $null
 }
 
@@ -615,10 +673,17 @@ try {
     Write-Host ("  Prefetched {0} host(s), {1} cluster(s), {2} datastore(s)." -f `
         $hostEntries.Count, $clusterEntries.Count, $dsEntries.Count) -ForegroundColor DarkGray
 
+    # With NORMAL/INFO rows off the console by default, a big estate would
+    # otherwise show nothing between section headers and read as hung. This is
+    # a status line, not scrollback, and it costs nothing when the output is
+    # redirected to a file or a CI log.
+    $hostIdx = 0
     foreach ($entry in $hostEntries) {
         $hv     = $entry.View
         $vcConn = $entry.VCenter
         $hName  = $hv.Name
+        $hostIdx++
+        Write-HealthCheckProgress -Activity 'Host health' -Current $hostIdx -Total $hostEntries.Count -Item $hName
 
         # Connection / power state
         if ([string]$hv.Runtime.ConnectionState -ne 'connected') {
@@ -780,10 +845,18 @@ try {
                 continue
             }
             $totalPaths += $paths.Count
-            $dead = @($paths | Where-Object { $_.PathState -in @('dead','disabled') })
-            if ($dead.Count -eq 0) { continue }
+            # Counted with a plain loop, not a Where-Object pipeline: this is
+            # the innermost loop in the script (every path of every LUN of
+            # every host), and the pipeline version also re-allocated the
+            # ('dead','disabled') array on each path it tested.
+            $deadCount = 0
+            foreach ($pth in $paths) {
+                $ps = $pth.PathState
+                if ($ps -eq 'dead' -or $ps -eq 'disabled') { $deadCount++ }
+            }
+            if ($deadCount -eq 0) { continue }
 
-            $activeCount = $paths.Count - $dead.Count
+            $activeCount = $paths.Count - $deadCount
             if ($activeCount -le 0) {
                 $offlineLuns.Add($lun.CanonicalName)
             } else {
@@ -1030,34 +1103,77 @@ try {
         'Config.Version', 'Config.GuestFullName', 'Config.Hardware.Device',
         'Guest.ToolsStatus', 'Guest.Disk', 'Snapshot'
     )
-    $vmViews = New-Object System.Collections.Generic.List[object]
-    $pcliVms = New-Object System.Collections.Generic.List[object]
+    # Each view is kept with the connection it came from, the same way
+    # $hostEntries does. A MoRef like 'VirtualMachine-vm-101' is only unique
+    # WITHIN one vCenter - two vCenters routinely both have a vm-101 - so any
+    # per-VM lookup across a multi-vCenter run has to be qualified by server.
+    $vmEntries = New-Object System.Collections.Generic.List[object]
     foreach ($conn in $connections) {
         foreach ($vv in @(Get-View -ViewType VirtualMachine -Property $vmProps -Server $conn)) {
-            $vmViews.Add($vv)
+            $vmEntries.Add([pscustomobject]@{ View = $vv; VCenter = $conn })
         }
-        foreach ($pv in @(Get-VM -Server $conn)) { $pcliVms.Add($pv) }
     }
 
     # Snapshot SIZE is the one thing the view layout doesn't hand over
     # directly, and it is the part that tells you whether a snapshot is
-    # urgent, so it still comes from one bulk Get-Snapshot for the whole
-    # inventory - O(1) calls, not one per VM. Everything else about a
-    # snapshot (name, age) comes from the view.
-    $snapsByVm  = @{}   # VM MoRef -> list of PowerCLI snapshot objects
+    # urgent, so it comes from Get-Snapshot - but ONLY for the VMs that
+    # actually have one. The views above already say which those are
+    # ($vv.Snapshot is $null otherwise), and in a real estate that is a
+    # handful of VMs out of thousands. Asking Get-VM / Get-Snapshot about
+    # the whole inventory to size a dozen snapshots was the last full-fat
+    # retrieval left in the script; when nothing has a snapshot, both calls
+    # now disappear entirely.
+    $snapsByVm  = @{}   # "<vCenter>|<VM MoRef>" -> list of PowerCLI snapshots
     $maxHwCache = @{}   # compute resource MoRef -> highest supported vmx-NN
-    if ($pcliVms.Count -gt 0) {
-        Write-Host "  Pre-fetching snapshot sizes for $($pcliVms.Count) VM(s)..." -ForegroundColor DarkGray
-        foreach ($sn in @(Get-Snapshot -VM $pcliVms)) {
-            $key = "$($sn.VM.ExtensionData.MoRef)"
-            if (-not $snapsByVm.ContainsKey($key)) { $snapsByVm[$key] = [System.Collections.Generic.List[object]]::new() }
-            $snapsByVm[$key].Add($sn)
+
+    # Grouped by connection so each Get-VM is bound to the vCenter whose
+    # MoRefs it is being given. An unqualified Get-VM -Id searches every
+    # connected server, so in a two-vCenter run it could match the other
+    # vCenter's vm-101 and size the wrong VM's snapshots.
+    $snapIdsByConn = @{}
+    foreach ($entry in $vmEntries) {
+        $vv = $entry.View
+        if (-not ($vv.Snapshot -and $vv.Snapshot.RootSnapshotList)) { continue }
+        $ck = "$($entry.VCenter)"
+        if (-not $snapIdsByConn.ContainsKey($ck)) {
+            $snapIdsByConn[$ck] = [pscustomobject]@{
+                Conn = $entry.VCenter
+                Ids  = (New-Object System.Collections.Generic.List[string])
+            }
+        }
+        $snapIdsByConn[$ck].Ids.Add("$($vv.MoRef)")
+    }
+
+    $snapVmTotal = 0
+    foreach ($g in $snapIdsByConn.Values) { $snapVmTotal += $g.Ids.Count }
+    if ($snapVmTotal -gt 0) {
+        Write-Host "  Sizing snapshots on $snapVmTotal VM(s) with snapshots..." -ForegroundColor DarkGray
+        foreach ($g in $snapIdsByConn.Values) {
+            try {
+                # .ToArray() rather than passing the List straight in: binding
+                # a generic List to a PowerCLI parameter is the "Argument types
+                # do not match" trap that WinPS 5.1 throws on.
+                $snapVms = @(Get-VM -Id $g.Ids.ToArray() -Server $g.Conn -ErrorAction Stop)
+                foreach ($sn in @(Get-Snapshot -VM $snapVms -ErrorAction Stop)) {
+                    $key = "$($g.Conn)|$($sn.VM.ExtensionData.MoRef)"
+                    if (-not $snapsByVm.ContainsKey($key)) { $snapsByVm[$key] = [System.Collections.Generic.List[object]]::new() }
+                    $snapsByVm[$key].Add($sn)
+                }
+            } catch {
+                # Sizes are a nice-to-have; age is what drives the finding.
+                # Losing them must not lose the snapshot rows themselves.
+                Write-Warning "Could not read snapshot sizes from $($g.Conn): $($_.Exception.Message). Snapshot age is still reported."
+            }
         }
     }
 
-    foreach ($vv in $vmViews) {
+    $vmIdx = 0
+    foreach ($vmEntry in $vmEntries) {
+        $vv         = $vmEntry.View
         $vmName     = $vv.Name
         $powerState = [string]$vv.Runtime.PowerState
+        $vmIdx++
+        Write-HealthCheckProgress -Activity 'VM compliance' -Current $vmIdx -Total $vmEntries.Count -Item $vmName
 
         # Runtime.ConnectionState / ConsolidationNeeded are requested above, so
         # they arrive populated. If vCenter still returns nothing, that is
@@ -1230,7 +1346,7 @@ try {
         # Snapshot age, from the view's snapshot tree; size from the bulk
         # Get-Snapshot above, matched by name.
         $snapSizes = @{}
-        foreach ($sn in @($snapsByVm["$($vv.MoRef)"])) {
+        foreach ($sn in @($snapsByVm["$($vmEntry.VCenter)|$($vv.MoRef)"])) {
             if ($sn) { $snapSizes[[string]$sn.Name] = $sn.SizeGB }
         }
         foreach ($node in (Get-SnapshotNode -Nodes $vv.Snapshot.RootSnapshotList)) {
@@ -1380,6 +1496,11 @@ finally {
     #region --- Report + disconnect ------------------------------------------
     $summary = $script:Results | Group-Object Status | ForEach-Object { "$($_.Name)=$($_.Count)" }
     Write-Host "`n=== Summary: $($summary -join '  ') ===" -ForegroundColor Cyan
+    # Say plainly that rows were withheld from the console, so a quiet run
+    # never reads as a run that found nothing.
+    if ($script:QuietRows -gt 0) {
+        Write-Host "$($script:QuietRows) NORMAL/INFO row(s) not shown above - all rows are in the reports below (-ShowAllConsoleOutput to see them here)." -ForegroundColor DarkGray
+    }
 
     # $ReportPath was created and resolved during setup, before the run started.
     $stamp     = Get-Date -Format 'yyyyMMdd-HHmmss'
@@ -1490,12 +1611,24 @@ finally {
 </style>
 "@
 
-    # Per-status counts for the stat tiles and filter buttons. @() guards the
-    # PowerShell quirk where a single matching object has no usable .Count.
-    $cFail = @($script:Results | Where-Object { $_.Status -eq 'FAIL' }).Count
-    $cWarn = @($script:Results | Where-Object { $_.Status -eq 'WARN' }).Count
-    $cInfo = @($script:Results | Where-Object { $_.Status -eq 'INFO' }).Count
-    $cNormal = @($script:Results | Where-Object { $_.Status -eq 'NORMAL' }).Count
+    # Per-status counts, plus the per-object rollup for the Objects ring, in
+    # ONE pass over the results. This used to be four separate
+    # Where-Object pipelines (four full passes, each invoking a scriptblock
+    # per row) plus a fifth pass for the rollup.
+    $cFail = 0; $cWarn = 0; $cInfo = 0; $cNormal = 0
+    # Object -> worst severity seen (3 FAIL / 2 WARN / 1 otherwise)
+    $objState = @{}
+    foreach ($r in $script:Results) {
+        $rank = 1
+        switch ($r.Status) {
+            'FAIL'   { $cFail++;   $rank = 3 }
+            'WARN'   { $cWarn++;   $rank = 2 }
+            'INFO'   { $cInfo++ }
+            'NORMAL' { $cNormal++ }
+        }
+        $cur = $objState[$r.Object]
+        if ($null -eq $cur -or $rank -gt $cur) { $objState[$r.Object] = $rank }
+    }
     $cAttn = $cFail + $cWarn
     # $script:Results is a List[object]; read .Count directly. Wrapping it as
     # @($script:Results).Count throws "Argument types do not match" in WinPS 5.1.
@@ -1539,17 +1672,12 @@ finally {
         $svg.ToString()
     }
 
-    # Roll each object up to a single health bucket: Critical if anything about
-    # it FAILs, Warning if anything WARNs, Normal otherwise. Three buckets, not
-    # four - an "Unknown" slice would only ever catch an object whose every row
-    # was informational, which is rare enough that it reads as an empty
-    # mystery rather than as information.
-    $objState = @{}
-    foreach ($r in $script:Results) {
-        $cur = $objState[$r.Object]
-        $rank = switch ($r.Status) { 'FAIL' { 3 } 'WARN' { 2 } default { 1 } }
-        if ($null -eq $cur -or $rank -gt $cur) { $objState[$r.Object] = $rank }
-    }
+    # Each object rolls up to a single health bucket: Critical if anything
+    # about it FAILs, Warning if anything WARNs, Normal otherwise. Three
+    # buckets, not four - an "Unknown" slice would only ever catch an object
+    # whose every row was informational, which is rare enough that it reads as
+    # an empty mystery rather than as information. $objState was filled by the
+    # single counting pass above.
     $oCrit = 0; $oWarn = 0; $oNorm = 0
     foreach ($v in $objState.Values) {
         switch ($v) { 3 { $oCrit++ } 2 { $oWarn++ } default { $oNorm++ } }
@@ -1608,16 +1736,22 @@ finally {
                 Check = $r.Check
                 Id    = 'sec-' + (($key -replace '[^A-Za-z0-9]+', '-').Trim('-'))
                 Rows  = (New-Object System.Collections.Generic.List[object])
+                Fail  = 0
+                Warn  = 0
             })
         }
-        $sections[$secIndex[$key]].Rows.Add($r)
+        $sec = $sections[$secIndex[$key]]
+        $sec.Rows.Add($r)
+        # Tallied here rather than re-derived with a Where-Object per section
+        # per status when the contents list is built.
+        if ($r.Status -eq 'FAIL') { $sec.Fail++ } elseif ($r.Status -eq 'WARN') { $sec.Warn++ }
     }
 
     # Contents/appendix, grouped by category
     $tocHtml = foreach ($catGrp in ($sections | Group-Object Cat)) {
         $items = foreach ($sec in $catGrp.Group) {
-            $f = @($sec.Rows | Where-Object { $_.Status -eq 'FAIL' }).Count
-            $w = @($sec.Rows | Where-Object { $_.Status -eq 'WARN' }).Count
+            $f = $sec.Fail
+            $w = $sec.Warn
             $badges = ''
             if ($f -gt 0) { $badges += "<span class='b bFAIL'>$f FAIL</span>" }
             if ($w -gt 0) { $badges += "<span class='b bWARN'>$w WARN</span>" }
@@ -1629,19 +1763,28 @@ finally {
 
     # One anchored section + table per Check (Object / Status / Detail columns;
     # Category and Check live in the heading)
-    $bodyHtml = foreach ($sec in $sections) {
-        $secRows = ($sec.Rows | ForEach-Object {
-            "<tr data-status='$($_.Status)'><td>$([System.Net.WebUtility]::HtmlEncode([string]$_.Object))</td>" +
-            "<td><span class='badge badge-$($_.Status)'>$($_.Status)</span></td><td>$([System.Net.WebUtility]::HtmlEncode([string]$_.Detail))</td></tr>"
-        }) -join "`n"
-        @"
-<h2 id="$($sec.Id)" data-section="$($sec.Id)">$($sec.Cat) &rsaquo; $($sec.Check) <span class="seccount">($($sec.Rows.Count))</span> <a class="backtop" href="#top">&uarr; top</a></h2>
-<table data-section-table="$($sec.Id)"><tr><th>Object</th><th>Status</th><th>Detail</th></tr>
-$secRows
-</table>
-"@
+    # Built into one StringBuilder rather than accumulating per-row strings
+    # through a ForEach-Object pipeline: this is the one loop that runs once
+    # per result row, so it is where the report generator actually spends its
+    # time on a big estate.
+    $sb = New-Object System.Text.StringBuilder
+    foreach ($sec in $sections) {
+        [void]$sb.Append('<h2 id="').Append($sec.Id).Append('" data-section="').Append($sec.Id).Append('">')
+        [void]$sb.Append($sec.Cat).Append(' &rsaquo; ').Append($sec.Check)
+        [void]$sb.Append(' <span class="seccount">(').Append($sec.Rows.Count).Append(')</span>')
+        [void]$sb.AppendLine(' <a class="backtop" href="#top">&uarr; top</a></h2>')
+        [void]$sb.Append('<table data-section-table="').Append($sec.Id).AppendLine('"><tr><th>Object</th><th>Status</th><th>Detail</th></tr>')
+        foreach ($row in $sec.Rows) {
+            $st = $row.Status
+            [void]$sb.Append("<tr data-status='").Append($st).Append("'><td>")
+            [void]$sb.Append([System.Net.WebUtility]::HtmlEncode([string]$row.Object))
+            [void]$sb.Append("</td><td><span class='badge badge-").Append($st).Append("'>").Append($st).Append('</span></td><td>')
+            [void]$sb.Append([System.Net.WebUtility]::HtmlEncode([string]$row.Detail))
+            [void]$sb.AppendLine('</td></tr>')
+        }
+        [void]$sb.AppendLine('</table>')
     }
-    $bodyHtml = $bodyHtml -join "`n"
+    $bodyHtml = $sb.ToString()
 
     $html = @"
 <!DOCTYPE html><html><head><meta charset='utf-8'>$style

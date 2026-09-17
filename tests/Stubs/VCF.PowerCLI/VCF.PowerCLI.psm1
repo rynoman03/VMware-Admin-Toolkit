@@ -266,6 +266,7 @@ function New-FixtureVmView {
         [string] $ConnectionState = 'connected',
         [object] $Consolidation = $false,
         [string] $HardwareVersion = 'vmx-19',
+        [object] $Snapshot = $null,
         [switch] $NoUpdateableRuntime
     )
     $runtime = [pscustomobject]@{
@@ -291,7 +292,26 @@ function New-FixtureVmView {
             ToolsStatus = 'toolsOk'
             Disk        = @([pscustomobject]@{ DiskPath = 'C:\'; FreeSpace = 64GB; Capacity = 120GB })
         }
-        Snapshot = $null
+        Snapshot = $Snapshot
+    }
+}
+
+# One node of a VM's snapshot tree, shaped the way Snapshot.RootSnapshotList
+# comes back: a name, a creation time, and a child list that the script has to
+# recurse into to find nested snapshots.
+function New-FixtureSnapshotNode {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '',
+        Justification = 'Builds an in-memory object for the fixture; changes no system state.')]
+    param(
+        [string] $Name,
+        [int]    $AgeDays,
+        [object[]] $Children = @()
+    )
+    [pscustomobject]@{
+        Name              = $Name
+        Snapshot          = "VirtualMachineSnapshot-snapshot-$Name"
+        CreateTime        = (Get-Date).AddDays(-$AgeDays)
+        ChildSnapshotList = $Children
     }
 }
 
@@ -340,8 +360,30 @@ function Get-FixtureVmView {
         $ghost.Runtime.ConsolidationNeeded = $null
         $vms += $ghost
     }
+
+    # A VM carrying a nested snapshot tree: an old root with a recent child.
+    # Exercises the recursive tree walk, the age thresholds on both nodes, and
+    # the size lookup - none of which had any coverage while every fixture VM
+    # had Snapshot = $null.
+    # MultiVCenter deliberately has NO snapshots anywhere, so the suite can
+    # assert the other half of the contract: when nothing has a snapshot, the
+    # sizing calls do not happen at all.
+    if ((Get-FixtureScenario) -ne 'MultiVCenter') {
+        $vms += New-FixtureVmView -Name 'snapvm01' -MoRef 'VirtualMachine-vm-201' -Snapshot ([pscustomobject]@{
+            RootSnapshotList = @(
+                New-FixtureSnapshotNode -Name 'before-patching' -AgeDays 45 -Children @(
+                    New-FixtureSnapshotNode -Name 'after-patching' -AgeDays 1
+                )
+            )
+        })
+    }
     $vms
 }
+
+# Snapshot sizes the stub's Get-Snapshot hands back, by snapshot name. Only
+# the root has a size here, so the report still has to cope with a snapshot
+# whose size it cannot resolve.
+$script:FixtureSnapshotSizes = @{ 'before-patching' = 12.5 }
 
 function Get-FixtureClusterView {
     $clusters = @([pscustomobject]@{
@@ -447,15 +489,36 @@ function Get-View {
     }
 }
 
-# Still PowerCLI objects, and still ONE bulk call each: Get-VM only so
-# Get-Snapshot has something to take, and Get-Snapshot only for snapshot SIZE,
-# which the view layout doesn't expose directly.
+# Still PowerCLI objects: Get-VM only so Get-Snapshot has something to take,
+# and Get-Snapshot only for snapshot SIZE, which the view layout doesn't
+# expose directly. Both are now expected to be asked ONLY about the VMs that
+# actually have snapshots, so -Id is honoured rather than ignored - a stub
+# that quietly returned the whole inventory for any argument could not tell a
+# scoped call from an unscoped one.
 function Get-VM {
     [CmdletBinding()]
-    param([Parameter(ValueFromPipeline)] $InputObject, $Server)
+    param(
+        [Parameter(ValueFromPipeline)] $InputObject,
+        [string[]] $Id,
+        $Server
+    )
     process {
-        Write-FixtureCall 'Get-VM'
-        @(Get-FixtureVmView | ForEach-Object {
+        # Logged with its scope, not just its name: the property under test is
+        # that the script asks about a handful of VMs rather than all of them,
+        # and a bare 'Get-VM' in the log cannot express that.
+        # Scope AND server binding are both logged. A MoRef is only unique
+        # within one vCenter, so an unqualified Get-VM -Id in a multi-vCenter
+        # run can match the wrong vCenter's VM; the test asserts the call
+        # carries -Server, which a bare name in the log could not show.
+        $scope  = if ($Id) { "scoped:$(@($Id).Count)" } else { 'all' }
+        $bound  = if ($Server) { 'server' } else { 'noserver' }
+        Write-FixtureCall "Get-VM:$scope`:$bound"
+        $wanted = $null
+        if ($Id) {
+            $wanted = @{}
+            foreach ($i in $Id) { $wanted["$i"] = $true }
+        }
+        @(Get-FixtureVmView | Where-Object { $null -eq $wanted -or $wanted.ContainsKey("$($_.MoRef)") } | ForEach-Object {
             [pscustomobject]@{
                 Name          = $_.Name
                 ExtensionData = [pscustomobject]@{ MoRef = $_.MoRef }
@@ -468,7 +531,29 @@ function Get-Snapshot {
     [CmdletBinding()]
     param($VM)
     Write-FixtureCall 'Get-Snapshot'
-    @()
+    $out = New-Object System.Collections.Generic.List[object]
+    foreach ($v in @($VM)) {
+        $view = @(Get-FixtureVmView | Where-Object { "$($_.MoRef)" -eq "$($v.ExtensionData.MoRef)" })[0]
+        if (-not $view -or -not $view.Snapshot) { continue }
+        foreach ($node in (Get-FixtureSnapshotFlat -Nodes $view.Snapshot.RootSnapshotList)) {
+            if (-not $script:FixtureSnapshotSizes.ContainsKey($node.Name)) { continue }
+            $out.Add([pscustomobject]@{
+                Name   = $node.Name
+                SizeGB = $script:FixtureSnapshotSizes[$node.Name]
+                VM     = $v
+            })
+        }
+    }
+    , $out.ToArray()
+}
+
+function Get-FixtureSnapshotFlat {
+    param([object] $Nodes)
+    foreach ($n in @($Nodes)) {
+        if (-not $n) { continue }
+        $n
+        if ($n.ChildSnapshotList) { Get-FixtureSnapshotFlat -Nodes $n.ChildSnapshotList }
+    }
 }
 
 Export-ModuleMember -Function Set-PowerCLIConfiguration, Connect-VIServer, Disconnect-VIServer,
