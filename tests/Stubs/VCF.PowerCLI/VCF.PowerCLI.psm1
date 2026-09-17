@@ -215,12 +215,39 @@ function New-FixtureHostView {
             Certificate   = New-FixtureCertificatePem -DaysValid $CertDaysValid
             LockdownMode  = 'lockdownNormal'
             Service       = [pscustomobject]@{ Service = @(
-                [pscustomobject]@{ Key = 'ntpd';    Running = $true  }
-                [pscustomobject]@{ Key = 'TSM-SSH'; Running = $false }
+                [pscustomobject]@{ Key = 'ntpd';           Label = 'NTP Daemon';        Policy = 'on';  Running = $true  }
+                [pscustomobject]@{ Key = 'TSM-SSH';        Label = 'SSH';               Policy = 'off'; Running = $false }
+                [pscustomobject]@{ Key = 'vpxa';           Label = 'VMware vCenter Agent'; Policy = 'on'; Running = $true }
+                [pscustomobject]@{ Key = 'DCUI';           Label = 'Direct Console UI'; Policy = 'on';  Running = $true  }
+                # Policy 'off' AND stopped: switched off on purpose, so this
+                # must not be reported as a service that is down.
+                [pscustomobject]@{ Key = 'snmpd';          Label = 'SNMP Server';       Policy = 'off'; Running = $false }
+                # Degraded: a service that IS set to start with the host but
+                # isn't running - the case the check exists for.
+                [pscustomobject]@{ Key = 'sfcbd-watchdog'; Label = 'CIM Server';        Policy = 'on';
+                                   Running = ((Get-FixtureScenario) -ne 'Degraded') }
             ) }
             DateTimeInfo  = [pscustomobject]@{ NtpConfig = [pscustomobject]@{ Server = @('time1.fixture.local', 'time2.fixture.local') } }
             Option        = $options.ToArray()
             StorageDevice = $storage
+            Network       = [pscustomobject]@{
+                Pnic = @(
+                    [pscustomobject]@{ Key = 'key-vim.host.PhysicalNic-vmnic0'; Device = 'vmnic0'; LinkSpeed = [pscustomobject]@{ SpeedMb = 10000 } }
+                    # Degraded: an uplink assigned to a switch with no link -
+                    # the case the check exists for.
+                    [pscustomobject]@{ Key = 'key-vim.host.PhysicalNic-vmnic1'; Device = 'vmnic1'
+                                       LinkSpeed = if ((Get-FixtureScenario) -eq 'Degraded') { $null } else { [pscustomobject]@{ SpeedMb = 10000 } } }
+                    # Unassigned NIC with no cable: normal, and must NOT be
+                    # reported - flagging spare NICs would bury the real one.
+                    [pscustomobject]@{ Key = 'key-vim.host.PhysicalNic-vmnic7'; Device = 'vmnic7'; LinkSpeed = $null }
+                )
+                Vswitch = @(
+                    [pscustomobject]@{ Name = 'vSwitch0'; Pnic = @(
+                        'key-vim.host.PhysicalNic-vmnic0', 'key-vim.host.PhysicalNic-vmnic1') }
+                )
+                ProxySwitch = @()
+                DnsConfig   = [pscustomobject]@{ Address = @('10.10.0.5', '10.10.0.6') }
+            }
         }
         Summary   = [pscustomobject]@{
             Hardware   = [pscustomobject]@{ CpuMhz = 2500; NumCpuCores = 24; MemorySize = [int64]512 * 1GB }

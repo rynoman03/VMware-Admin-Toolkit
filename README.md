@@ -56,7 +56,7 @@ report showing those failures.
 
 The script checks:
 
-- **Host health** — connection state, NTP, syslog (both optionally compared against an expected baseline), uptime, datastore connectivity, FC/iSCSI storage path state (dead paths, even when a datastore still reads as accessible on its remaining paths), TLS certificate expiry (ESXi hosts and vCenter itself), local account password expiration policy (root included), ESXi build vs. vCenter build, lockdown mode, SSH service state
+- **Host health** — connection state, host services set to start with the host, NIC link state, uplink redundancy, DNS, NTP, syslog (both optionally compared against an expected baseline), uptime, datastore connectivity, FC/iSCSI storage path state (dead paths, even when a datastore still reads as accessible on its remaining paths), TLS certificate expiry (ESXi hosts and vCenter itself), local account password expiration policy (root included), ESXi build vs. vCenter build, lockdown mode, SSH service state
 - **VM compliance** — connection state (orphaned/inaccessible VMs), disk consolidation needed, VMware Tools, OS system drive free space (`C:\` / `/`, as a **percentage** of the volume), all other guest drives, VM hardware version, mounted ISOs/CD-ROMs, connected floppy drives, snapshot age
 - **Capacity** — datastore free space, cluster CPU/RAM utilization
 - **Cluster config** — HA, admission control, DRS, EVC
@@ -170,6 +170,44 @@ off.
 A cluster whose EVC mode vCenter doesn't report is also `INFO`, with a
 different detail (`not reported by vCenter`), so "off" and "couldn't tell" are
 never conflated.
+
+**Guest drive thresholds are percentages.** `-OSDriveFreeWarnPercent` (default
+15) and `-DataDriveFreeWarnPercent` (default 10) flag a volume by how full it
+is, not by absolute GB. 20GB free is comfortable on a 1TB data disk and nearly
+full on a 40GB system disk, so a single GB threshold either cried wolf on large
+volumes or stayed silent on small ones. The detail still shows the GB figures
+for context: `C:\ 12.3% free (9.8GB of 80GB)`.
+
+**Host services.** `WARN` when a service whose start policy is *on* or
+*automatic* isn't running — something that is supposed to come up with the host
+and hasn't. A service with policy *off* that is stopped was turned off on
+purpose and is never reported, which is what keeps this from flagging every
+optional daemon on every host. `ntpd` and `TSM-SSH` have their own rows, so
+they're left out here rather than counted twice.
+
+**Network.** Three checks, all read from data the host view already carries, so
+they cost no extra API calls:
+
+- **NIC link state** — uplinks assigned to a vSwitch or DVS that have no link.
+  Graded like storage paths: `WARN` while the switch still has another uplink up
+  (redundancy lost, traffic flowing), `FAIL` only when a switch has **no** uplink
+  carrying link, because that switch's traffic is actually down. An unused NIC
+  with no cable in it is normal and is never reported — flagging spare NICs
+  would bury the real finding.
+- **Uplink redundancy** — `WARN` on a switch down to fewer than two live
+  uplinks, where one cable, NIC or switch port failure takes the traffic with it.
+- **DNS** — `WARN` when no DNS servers are configured. A host that can't resolve
+  names produces confusing failures elsewhere (vCenter operations, NTP and
+  syslog by hostname).
+
+**Local account password expiration.** Reads `Security.PasswordMaxDays`, the
+host-wide maximum age a local password may reach. `WARN` at `99999` — VMware's
+shipped default and its "never expires" sentinel rather than an age anyone chose
+— or above `-PasswordMaxDaysWarn` (default 365); `PASS` below that; `INFO` if the
+host doesn't report the setting. A specific account's actual days-until-expiry
+(root's included) isn't exposed by the vCenter API at all — that lives in the
+host's shadow file and needs SSH and `chage -l root` — so the detail says so
+rather than implying the report has checked it.
 
 **ESXi build vs. vCenter build.** VMware only supports ESXi hosts within roughly two
 major versions behind vCenter, and a host *newer* than vCenter is unsupported outright
