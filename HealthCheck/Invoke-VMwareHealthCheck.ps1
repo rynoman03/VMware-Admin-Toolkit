@@ -898,22 +898,49 @@ try {
     }
 
     foreach ($vm in $vms) {
+        # Runtime.ConnectionState / Runtime.ConsolidationNeeded aren't always
+        # populated on the cached view Get-VM hands back (PowerCLI retrieves a
+        # filtered property set), which reads as $null rather than as an error.
+        # Refresh just those two properties when either is missing, so only the
+        # affected VMs pay a round-trip.
+        $connState     = $vm.ExtensionData.Runtime.ConnectionState
+        $consolidation = $vm.ExtensionData.Runtime.ConsolidationNeeded
+        if ($null -eq $connState -or $null -eq $consolidation) {
+            try {
+                $vm.ExtensionData.UpdateViewData('Runtime.ConnectionState', 'Runtime.ConsolidationNeeded')
+                $connState     = $vm.ExtensionData.Runtime.ConnectionState
+                $consolidation = $vm.ExtensionData.Runtime.ConsolidationNeeded
+            } catch {
+                # Leave both $null; reported as INFO below rather than guessed at.
+            }
+        }
+
         # Connection state - orphaned/inaccessible/invalid is vCenter's
         # inventory losing track of the VM (the "question mark" icon in the
         # vSphere Client). Runs regardless of power state and is easy to miss
-        # since it doesn't show up in any other check here.
-        $connState = $vm.ExtensionData.Runtime.ConnectionState
-        switch ($connState) {
-            'connected'    { Add-Result 'VMCompliance' $vm.Name 'ConnectionState' 'PASS' 'Connected' }
-            'disconnected' { Add-Result 'VMCompliance' $vm.Name 'ConnectionState' 'WARN' 'Disconnected (host may be unreachable)' }
-            default        { Add-Result 'VMCompliance' $vm.Name 'ConnectionState' 'FAIL' "$connState" }
+        # since it doesn't show up in any other check here. Only the known-bad
+        # states FAIL: an unreadable state is reported as INFO, never as a
+        # failure, so a healthy VM is never flagged just because vCenter didn't
+        # hand back the property.
+        switch ([string]$connState) {
+            'connected'    { Add-Result 'VMCompliance' $vm.Name 'ConnectionState' 'PASS' "Connected to vCenter ($($vm.PowerState))" }
+            'disconnected' { Add-Result 'VMCompliance' $vm.Name 'ConnectionState' 'WARN' 'Disconnected - the host running this VM is currently unreachable from vCenter' }
+            'orphaned'     { Add-Result 'VMCompliance' $vm.Name 'ConnectionState' 'FAIL' 'Orphaned - vCenter has an inventory entry but the host does not report this VM (shows as a question mark in the vSphere Client)' }
+            'inaccessible' { Add-Result 'VMCompliance' $vm.Name 'ConnectionState' 'FAIL' 'Inaccessible - the VM config file (.vmx) cannot be read, usually a datastore or storage problem' }
+            'invalid'      { Add-Result 'VMCompliance' $vm.Name 'ConnectionState' 'FAIL' 'Invalid - vCenter considers this VM unusable, usually a corrupt or unreadable .vmx' }
+            ''             { Add-Result 'VMCompliance' $vm.Name 'ConnectionState' 'INFO' "Connection state not reported by vCenter for this VM; VM is $($vm.PowerState)" }
+            default        { Add-Result 'VMCompliance' $vm.Name 'ConnectionState' 'INFO' "Unrecognized connection state '$connState'; VM is $($vm.PowerState)" }
         }
 
         # Disk consolidation needed - leftover snapshot delta disks, often
         # left behind by backup software that didn't clean up after itself,
         # that silently consume growing datastore space until consolidated.
-        if ($vm.ExtensionData.Runtime.ConsolidationNeeded) {
-            Add-Result 'VMCompliance' $vm.Name 'DiskConsolidation' 'WARN' 'Disk consolidation needed - leftover snapshot delta disk(s) present'
+        # $null (property unavailable) is distinct from $false here: reporting
+        # it as PASS would silently claim a clean result that was never checked.
+        if ($null -eq $consolidation) {
+            Add-Result 'VMCompliance' $vm.Name 'DiskConsolidation' 'INFO' 'Consolidation state not reported by vCenter for this VM'
+        } elseif ($consolidation) {
+            Add-Result 'VMCompliance' $vm.Name 'DiskConsolidation' 'WARN' 'Disk consolidation needed - leftover snapshot delta disk(s) present; consolidate from the vSphere Client (Snapshots > Consolidate)'
         } else {
             Add-Result 'VMCompliance' $vm.Name 'DiskConsolidation' 'PASS' 'No consolidation needed'
         }
@@ -1123,9 +1150,9 @@ try {
         # same-generation clusters, in case a differing host is added later.
         $evc = $cl.ExtensionData.Summary.CurrentEVCModeKey
         if ($evc) {
-            Add-Result 'ClusterConfig' $cl.Name 'EVC' 'PASS' $evc
+            Add-Result 'ClusterConfig' $cl.Name 'EVC' 'PASS' "Enhanced vMotion Compatibility enabled, baseline '$evc' (masks host CPUs to a common instruction set so running VMs can vMotion between hosts with different CPU generations)"
         } else {
-            Add-Result 'ClusterConfig' $cl.Name 'EVC' 'WARN' 'Not configured - if hosts have mixed CPU generations, or a differing one is added later, vMotion may fail; consider enabling EVC as a hedge'
+            Add-Result 'ClusterConfig' $cl.Name 'EVC' 'WARN' 'Enhanced vMotion Compatibility (masks host CPUs to a common instruction set so running VMs can vMotion between hosts with different CPU generations) is not configured - if hosts have mixed CPU generations, or a differing one is added later, vMotion may fail; consider enabling EVC as a hedge'
         }
     }
     #endregion
