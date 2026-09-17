@@ -911,7 +911,13 @@ try {
                 $connState     = $vm.ExtensionData.Runtime.ConnectionState
                 $consolidation = $vm.ExtensionData.Runtime.ConsolidationNeeded
             } catch {
-                # Leave both $null; reported as INFO below rather than guessed at.
+                # Deliberately swallowed: leave both $null so the checks below
+                # report INFO rather than guessing. A VM whose properties can't
+                # be refreshed is not itself a finding, so this goes to the
+                # verbose stream instead of the report. (Write-Error is not an
+                # option here - $ErrorActionPreference is 'Stop', so it would
+                # terminate the run for a condition that is already handled.)
+                Write-Verbose "Could not refresh runtime properties for '$($vm.Name)': $($_.Exception.Message)"
             }
         }
 
