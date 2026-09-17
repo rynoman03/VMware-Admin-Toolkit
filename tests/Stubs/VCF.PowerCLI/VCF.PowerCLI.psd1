@@ -5,11 +5,11 @@
     Author            = 'VMware-Admin-Toolkit tests'
     Description       = 'Test stub standing in for PowerCLI. Not PowerCLI. See tests/README.md.'
     PowerShellVersion = '5.1'
+    # The health check now reads inventory through bulk Get-View calls, so the
+    # per-object cmdlets it used to call are gone from both sides.
     FunctionsToExport = @(
         'Set-PowerCLIConfiguration', 'Connect-VIServer', 'Disconnect-VIServer',
-        'Get-VMHost', 'Get-VMHostService', 'Get-VMHostNtpServer', 'Get-VMHostSysLogServer',
-        'Get-AdvancedSetting', 'Get-ScsiLun', 'Get-ScsiLunPath', 'Get-Datastore',
-        'Get-VM', 'Get-Snapshot', 'Get-CDDrive', 'Get-FloppyDrive', 'Get-Cluster'
+        'Get-View', 'Get-VM', 'Get-Snapshot'
     )
     CmdletsToExport   = @()
     VariablesToExport = @()

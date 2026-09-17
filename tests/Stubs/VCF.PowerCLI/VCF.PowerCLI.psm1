@@ -63,43 +63,6 @@ function New-FixtureCertificatePem {
     [System.Text.Encoding]::ASCII.GetBytes($pem)
 }
 
-function New-FixtureVMHost {
-    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '',
-        Justification = 'Builds an in-memory object for the fixture; changes no system state.')]
-    param(
-        [string] $Name,
-        [string] $ConnectionState = 'Connected',
-        [string] $Version = '8.0.2',
-        [string] $Build = '22380479',
-        [int]    $CertDaysValid = 300
-    )
-    [pscustomobject]@{
-        Name            = $Name
-        ConnectionState = $ConnectionState
-        Version         = $Version
-        Build           = $Build
-        # An SSO login puts a second '@' in the Uid - the shape that made
-        # parsing the managing server out of it unreliable.
-        Uid             = "/VIServer=administrator@vsphere.local@vcenter.fixture.invalid:443/VMHost=HostSystem-host-1/"
-        CpuTotalMhz     = 60000
-        CpuUsageMhz     = 12000
-        MemoryTotalGB   = 512.0
-        MemoryUsageGB   = 200.0
-        ExtensionData   = [pscustomobject]@{
-            Summary = [pscustomobject]@{
-                Runtime = [pscustomobject]@{
-                    # A NotResponding host reports no boot time.
-                    BootTime = if ($ConnectionState -eq 'Connected') { (Get-Date).AddDays(-45) } else { $null }
-                }
-            }
-            Config  = [pscustomobject]@{
-                Certificate  = New-FixtureCertificatePem -DaysValid $CertDaysValid
-                LockdownMode = 'lockdownNormal'
-            }
-        }
-    }
-}
-
 function Set-PowerCLIConfiguration {
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSShouldProcess', '',
         Justification = 'Stub: declares SupportsShouldProcess only so it accepts -Confirm like the real cmdlet does.')]
@@ -141,265 +104,339 @@ function Disconnect-VIServer {
     param($Server)
 }
 
-function Get-VMHost {
-    [CmdletBinding()]
-    param([Parameter(ValueFromPipeline)] $InputObject, $Server)
-    process {
-        switch (Get-FixtureScenario) {
-            'HostDown' {
-                @(
-                    (New-FixtureVMHost -Name 'esx01.fixture.local')
-                    (New-FixtureVMHost -Name 'esx02.fixture.local' -ConnectionState 'NotResponding')
-                )
-            }
-            'Degraded' {
-                # ESXi 6.x under vCenter 8.x is exactly two majors behind: the
-                # documented boundary, which is WARN and not FAIL.
-                @( New-FixtureVMHost -Name 'esx01.fixture.local' -Version '6.7.0' -Build '17167734' -CertDaysValid 10 )
-            }
-            'MultiVCenter' {
-                # Hosts belong to the connection they were enumerated through,
-                # and run that vCenter's version. Pairing a host with the other
-                # vCenter turns its PASS into a WARN.
-                if ($Server -and $Server.Name) {
-                    $tag = ($Server.Name -split '\.')[0]
-                    $v   = Get-FixtureVCenterVersion -ServerName $Server.Name
-                    @( New-FixtureVMHost -Name "$tag-esx01.fixture.local" -Version $v.Version -Build $v.Build )
-                } else {
-                    # Pipeline call from the cluster checks, which don't care
-                    # which vCenter a host came from.
-                    @( New-FixtureVMHost -Name 'esx01.fixture.local' )
-                }
-            }
-            default {
-                @(
-                    (New-FixtureVMHost -Name 'esx01.fixture.local')
-                    (New-FixtureVMHost -Name 'esx02.fixture.local')
-                )
-            }
-        }
+# Real VMware.Vim device classes, so the health check's
+# "$_ -is [VMware.Vim.VirtualCdrom]" test is exactly the test that runs in
+# production. Modelling these as pscustomobjects would have made the fixture
+# agree with a check that could never match a real device.
+if (-not ('VMware.Vim.VirtualCdrom' -as [type])) {
+    Add-Type -TypeDefinition @'
+namespace VMware.Vim {
+    public class VirtualDeviceConnectInfo { public bool Connected; public bool StartConnected; }
+    public class VirtualDeviceBackingInfo { public string FileName; }
+    public class VirtualDevice {
+        public int Key;
+        public VirtualDeviceConnectInfo Connectable;
+        public VirtualDeviceBackingInfo Backing;
+    }
+    public class VirtualCdrom : VirtualDevice { }
+    public class VirtualFloppy : VirtualDevice { }
+    public class VirtualDisk   : VirtualDevice { }
+}
+'@
+}
+
+# Records every inventory call when $env:HEALTHCHECK_FIXTURE_CALLLOG is set,
+# so a test can assert the health check makes a FIXED number of them rather
+# than one per host, per LUN or per VM. Without this, a refactor could quietly
+# reintroduce per-object round-trips and every behavioural assertion would
+# still pass.
+function Write-FixtureCall {
+    param([string] $What)
+    if ($env:HEALTHCHECK_FIXTURE_CALLLOG) {
+        Add-Content -LiteralPath $env:HEALTHCHECK_FIXTURE_CALLLOG -Value $What
     }
 }
 
-function Get-VMHostService {
-    [CmdletBinding()]
-    param([Parameter(ValueFromPipeline)] $InputObject)
-    process {
-        @(
-            [pscustomobject]@{ Key = 'ntpd';    Running = $true  }
-            [pscustomobject]@{ Key = 'TSM-SSH'; Running = $false }
-        )
+function New-FixtureDevice {
+    param([string] $Kind, [string] $FileName, [bool] $Connected, [bool] $StartConnected)
+    $d = New-Object "VMware.Vim.$Kind"
+    $d.Connectable = New-Object VMware.Vim.VirtualDeviceConnectInfo
+    $d.Connectable.Connected      = $Connected
+    $d.Connectable.StartConnected = $StartConnected
+    if ($FileName) {
+        $d.Backing = New-Object VMware.Vim.VirtualDeviceBackingInfo
+        $d.Backing.FileName = $FileName
     }
+    $d
 }
 
-function Get-VMHostNtpServer {
-    [CmdletBinding()]
-    param([Parameter(ValueFromPipeline)] $InputObject)
-    process { @('time1.fixture.local', 'time2.fixture.local') }
-}
-
-function Get-VMHostSysLogServer {
-    [CmdletBinding()]
-    param([Parameter(ValueFromPipeline)] $InputObject)
-    process { @([pscustomobject]@{ Host = 'syslog.fixture.local'; Port = 514 }) }
-}
-
-function Get-AdvancedSetting {
-    [CmdletBinding()]
-    param([Parameter(ValueFromPipeline)] $InputObject, $Name)
-    process {
-        # Degraded: the setting is absent. The cmdlet returns nothing rather
-        # than erroring, which is what used to read as "aging disabled".
-        if ((Get-FixtureScenario) -eq 'Degraded') { return }
-
-        # Only answer for advanced settings that actually exist on ESXi. This
-        # stub used to echo back whatever -Name it was handed, which meant a
-        # setting name that does not exist on a real host still produced a
-        # value here and sailed through CI - exactly how the health check
-        # shipped asking for 'Security.PasswordExpirationInDays', which is not
-        # a real setting. An unknown name now returns nothing, like the real
-        # cmdlet does.
-        $known = @{
-            'Security.PasswordMaxDays' = 90
-        }
-        if (-not $known.ContainsKey($Name)) { return }
-        [pscustomobject]@{ Name = $Name; Value = $known[$Name] }
-    }
-}
-
-function Get-ScsiLun {
-    [CmdletBinding()]
-    param([Parameter(ValueFromPipeline)] $InputObject, $LunType)
-    process {
-        if ((Get-FixtureScenario) -eq 'Degraded') {
-            Write-Error 'Unable to communicate with the remote host.'
-            return
-        }
-        @(
-            [pscustomobject]@{ CanonicalName = 'naa.60000000000000000000000000000001' }
-            [pscustomobject]@{ CanonicalName = 'naa.60000000000000000000000000000002' }
-        )
-    }
-}
-
-function Get-ScsiLunPath {
-    [CmdletBinding()]
-    param($ScsiLun)
-    @(
-        [pscustomobject]@{ State = 'Active'  }
-        [pscustomobject]@{ State = 'Active'  }
-        [pscustomobject]@{ State = 'Standby' }
-        [pscustomobject]@{ State = 'Standby' }
+# A HostSystem view in the shape Get-View returns it, carrying every property
+# the health check asks for in its -Property list.
+function New-FixtureHostView {
+    param(
+        [string] $Name,
+        [string] $MoRef,
+        [string] $ConnectionState = 'connected',
+        [string] $Version = '8.0.2',
+        [string] $Build = '22380479',
+        [int]    $CertDaysValid = 300,
+        [switch] $NoPasswordSetting,
+        [switch] $NoStorageDevice
     )
-}
 
-function Get-Datastore {
-    [CmdletBinding()]
-    param([Parameter(ValueFromPipeline)] $InputObject, $Server)
-    process {
-        $stores = @([pscustomobject]@{
-            Name          = 'DS-FIXTURE-01'
-            CapacityGB    = 4096.0
-            FreeSpaceGB   = 1800.0
-            ExtensionData = [pscustomobject]@{ Summary = [pscustomobject]@{ Accessible = $true } }
-        })
-        if ((Get-FixtureScenario) -eq 'Degraded') {
-            # Summary absent: '-not $null' is true, so this used to be reported
-            # as an inaccessible datastore - a FAIL for a healthy store.
-            $stores += [pscustomobject]@{
-                Name          = 'DS-NOSUMMARY'
-                CapacityGB    = 2048.0
-                FreeSpaceGB   = 900.0
-                ExtensionData = [pscustomobject]@{ Summary = $null }
+    $options = New-Object System.Collections.Generic.List[object]
+    $options.Add([pscustomobject]@{ Key = 'Syslog.global.logHost'; Value = 'udp://syslog.fixture.local:514' })
+    if (-not $NoPasswordSetting) {
+        $options.Add([pscustomobject]@{ Key = 'Security.PasswordMaxDays'; Value = 90 })
+    }
+
+    $storage = $null
+    if (-not $NoStorageDevice) {
+        $storage = [pscustomobject]@{
+            ScsiLun = @(
+                [pscustomobject]@{ Key = 'key-vim.host.ScsiDisk-1'; CanonicalName = 'naa.60000000000000000000000000000001'; DeviceType = 'disk' }
+                [pscustomobject]@{ Key = 'key-vim.host.ScsiDisk-2'; CanonicalName = 'naa.60000000000000000000000000000002'; DeviceType = 'disk' }
+            )
+            MultipathInfo = [pscustomobject]@{
+                Lun = @(
+                    [pscustomobject]@{ Lun = 'key-vim.host.ScsiDisk-1'; Path = @(
+                        [pscustomobject]@{ PathState = 'active' }, [pscustomobject]@{ PathState = 'active' }
+                        [pscustomobject]@{ PathState = 'active' }, [pscustomobject]@{ PathState = 'active' }) }
+                    [pscustomobject]@{ Lun = 'key-vim.host.ScsiDisk-2'; Path = @(
+                        [pscustomobject]@{ PathState = 'active' }, [pscustomobject]@{ PathState = 'active' }
+                        [pscustomobject]@{ PathState = 'active' }, [pscustomobject]@{ PathState = 'active' }) }
+                )
             }
         }
-        $stores
+    }
+
+    [pscustomobject]@{
+        Name      = $Name
+        MoRef     = $MoRef
+        Parent    = 'ClusterComputeResource-domain-c1'
+        # Degraded also mounts the datastore whose Summary never populates, so
+        # the host-side accessibility check actually sees it.
+        Datastore = if ((Get-FixtureScenario) -eq 'Degraded') {
+            @('Datastore-datastore-1', 'Datastore-datastore-2')
+        } else {
+            @('Datastore-datastore-1')
+        }
+        Runtime   = [pscustomobject]@{
+            ConnectionState = $ConnectionState
+            # A host vCenter can't reach reports no boot time.
+            BootTime        = if ($ConnectionState -eq 'connected') { (Get-Date).AddDays(-45) } else { $null }
+        }
+        Config    = [pscustomobject]@{
+            Product       = [pscustomobject]@{ Version = $Version; Build = $Build }
+            Certificate   = New-FixtureCertificatePem -DaysValid $CertDaysValid
+            LockdownMode  = 'lockdownNormal'
+            Service       = [pscustomobject]@{ Service = @(
+                [pscustomobject]@{ Key = 'ntpd';    Running = $true  }
+                [pscustomobject]@{ Key = 'TSM-SSH'; Running = $false }
+            ) }
+            DateTimeInfo  = [pscustomobject]@{ NtpConfig = [pscustomobject]@{ Server = @('time1.fixture.local', 'time2.fixture.local') } }
+            Option        = $options.ToArray()
+            StorageDevice = $storage
+        }
+        Summary   = [pscustomobject]@{
+            Hardware   = [pscustomobject]@{ CpuMhz = 2500; NumCpuCores = 24; MemorySize = [int64]512 * 1GB }
+            QuickStats = [pscustomobject]@{ OverallCpuUsage = 12000; OverallMemoryUsage = 204800 }
+        }
     }
 }
 
-function Get-VM {
-    [CmdletBinding()]
-    param([Parameter(ValueFromPipeline)] $InputObject, $Server)
-    process {
-        # Degraded: a hardware version matching neither 'vmx-NN' nor a bare
-        # number, which used to fall through to PASS.
-        $hw = if ((Get-FixtureScenario) -eq 'Degraded') { 'unknown' } else { 'vmx-19' }
-        $vms = @([pscustomobject]@{
-            Name          = 'app01'
-            Uid           = '/VIServer=administrator@vsphere.local@vcenter.fixture.invalid:443/VirtualMachine=vm-101/'
-            PowerState    = 'PoweredOn'
-            HardwareVersion = $hw
-            ExtensionData = [pscustomobject]@{
-                Runtime = [pscustomobject]@{ ConnectionState = 'connected'; ConsolidationNeeded = $false }
-                Guest   = [pscustomobject]@{
-                    ToolsStatus = 'toolsOk'
-                    Disk        = @([pscustomobject]@{ DiskPath = 'C:\'; FreeSpace = 64GB; Capacity = 120GB })
-                }
-            }
-        })
-
-        if ((Get-FixtureScenario) -eq 'Degraded') {
-            # A healthy, powered-on VM whose Runtime.ConnectionState and
-            # ConsolidationNeeded never come back. PowerCLI hands back a
-            # filtered property set, so these read as $null rather than as an
-            # error - and a $null that falls through to a FAIL catch-all is
-            # what reported running VMs as failed with a blank detail.
-            # UpdateViewData is a no-op here: the refresh succeeds but vCenter
-            # still has nothing to give, which must end as INFO, not FAIL.
-            $ghostRuntime = [pscustomobject]@{ ConnectionState = $null; ConsolidationNeeded = $null }
-            $ghostExt = [pscustomobject]@{
-                Runtime = $ghostRuntime
-                Guest   = [pscustomobject]@{ ToolsStatus = 'toolsOk'; Disk = @() }
-            }
-            $ghostExt | Add-Member -MemberType ScriptMethod -Name UpdateViewData -Value { param() } -Force
-            $vms += [pscustomobject]@{
-                Name            = 'ghost01'
-                Uid             = '/VIServer=administrator@vsphere.local@vcenter.fixture.invalid:443/VirtualMachine=vm-102/'
-                PowerState      = 'PoweredOn'
-                HardwareVersion = 'vmx-19'
-                ExtensionData   = $ghostExt
-            }
+function New-FixtureVmView {
+    param(
+        [string] $Name,
+        [string] $MoRef,
+        [string] $HostMoRef = 'HostSystem-host-1',
+        [string] $ConnectionState = 'connected',
+        [object] $Consolidation = $false,
+        [string] $HardwareVersion = 'vmx-19',
+        [switch] $NoUpdateableRuntime
+    )
+    $runtime = [pscustomobject]@{
+        ConnectionState     = $ConnectionState
+        ConsolidationNeeded = $Consolidation
+        PowerState          = 'poweredOn'
+        Host                = $HostMoRef
+    }
+    [pscustomobject]@{
+        Name    = $Name
+        MoRef   = $MoRef
+        Runtime = $runtime
+        Config  = [pscustomobject]@{
+            Version        = $HardwareVersion
+            GuestFullName  = 'Microsoft Windows Server 2019 (64-bit)'
+            Hardware       = [pscustomobject]@{ Device = @(
+                # A stale ISO on a DISCONNECTED drive blocks nothing, so it
+                # must not be reported as mounted media.
+                (New-FixtureDevice -Kind 'VirtualCdrom' -FileName '[DS-FIXTURE-01] iso/installer.iso' -Connected $false -StartConnected $false)
+            ) }
         }
-        $vms
+        Guest   = [pscustomobject]@{
+            ToolsStatus = 'toolsOk'
+            Disk        = @([pscustomobject]@{ DiskPath = 'C:\'; FreeSpace = 64GB; Capacity = 120GB })
+        }
+        Snapshot = $null
     }
 }
 
-function Get-Snapshot {
-    [CmdletBinding()]
-    param($VM)
-    @()
-}
-
-function Get-CDDrive {
-    [CmdletBinding()]
-    param($VM)
-    # A stale IsoPath on a DISCONNECTED drive: blocks nothing, so it must not
-    # be reported as mounted media.
-    @([pscustomobject]@{
-        Parent          = @($VM)[0]
-        IsoPath         = '[DS-FIXTURE-01] iso/installer.iso'
-        HostDevice      = $null
-        RemoteDevice    = $null
-        ConnectionState = [pscustomobject]@{ Connected = $false; StartConnected = $false }
-    })
-}
-
-function Get-FloppyDrive {
-    [CmdletBinding()]
-    param($VM)
-    @()
-}
-
-function Get-Cluster {
-    [CmdletBinding()]
+function Get-FixtureHostViews {
     param($Server)
+    switch (Get-FixtureScenario) {
+        'HostDown' {
+            @(
+                (New-FixtureHostView -Name 'esx01.fixture.local' -MoRef 'HostSystem-host-1')
+                (New-FixtureHostView -Name 'esx02.fixture.local' -MoRef 'HostSystem-host-2' -ConnectionState 'notResponding')
+            )
+        }
+        'Degraded' {
+            # ESXi 6.x under vCenter 8.x is exactly two majors behind: the
+            # documented boundary, which is WARN and not FAIL. No storage
+            # device data and no password setting, so those checks must report
+            # their "couldn't read" paths rather than inventing a result.
+            @( New-FixtureHostView -Name 'esx01.fixture.local' -MoRef 'HostSystem-host-1' `
+                 -Version '6.7.0' -Build '17167734' -CertDaysValid 10 -NoPasswordSetting -NoStorageDevice )
+        }
+        'MultiVCenter' {
+            $tag = if ($Server -and $Server.Name) { ($Server.Name -split '\.')[0] } else { 'vcenter-a' }
+            $v   = Get-FixtureVCenterVersion -ServerName $(if ($Server) { $Server.Name } else { 'vcenter-a' })
+            @( New-FixtureHostView -Name "$tag-esx01.fixture.local" -MoRef "HostSystem-$tag-1" -Version $v.Version -Build $v.Build )
+        }
+        default {
+            @(
+                (New-FixtureHostView -Name 'esx01.fixture.local' -MoRef 'HostSystem-host-1')
+                (New-FixtureHostView -Name 'esx02.fixture.local' -MoRef 'HostSystem-host-2')
+            )
+        }
+    }
+}
+
+function Get-FixtureVmViews {
+    $vms = @( New-FixtureVmView -Name 'app01' -MoRef 'VirtualMachine-vm-101' `
+                -HardwareVersion $(if ((Get-FixtureScenario) -eq 'Degraded') { 'unknown' } else { 'vmx-19' }) )
+
+    if ((Get-FixtureScenario) -eq 'Degraded') {
+        # A healthy, powered-on VM whose Runtime.ConnectionState and
+        # ConsolidationNeeded never come back. A $null that falls through to a
+        # FAIL catch-all is what reported running VMs as failed with a blank
+        # detail.
+        $ghost = New-FixtureVmView -Name 'ghost01' -MoRef 'VirtualMachine-vm-102'
+        $ghost.Runtime.ConnectionState     = $null
+        $ghost.Runtime.ConsolidationNeeded = $null
+        $vms += $ghost
+    }
+    $vms
+}
+
+function Get-FixtureClusterViews {
     $clusters = @([pscustomobject]@{
-        Name               = 'CL-FIXTURE'
-        HAEnabled          = $true
-        DrsEnabled         = $true
-        DrsAutomationLevel = 'FullyAutomated'
-        EVCMode            = $null
-        ExtensionData      = [pscustomobject]@{
-            Configuration = [pscustomobject]@{ DasConfig = [pscustomobject]@{ AdmissionControlEnabled = $true } }
-            Summary       = [pscustomobject]@{ CurrentEVCModeKey = 'intel-skylake' }
+        Name          = 'CL-FIXTURE'
+        MoRef         = 'ClusterComputeResource-domain-c1'
+        Host          = @('HostSystem-host-1', 'HostSystem-host-2')
+        Summary       = [pscustomobject]@{ CurrentEVCModeKey = 'intel-skylake' }
+        Configuration = [pscustomobject]@{
+            DasConfig = [pscustomobject]@{ Enabled = $true; AdmissionControlEnabled = $true }
+            DrsConfig = [pscustomobject]@{ Enabled = $true; DefaultVmBehavior = 'fullyAutomated' }
         }
     })
 
     if ((Get-FixtureScenario) -eq 'Degraded') {
         # A cluster whose view never populates Summary or Configuration.
         # Treating those $nulls as answers reported EVC as "not configured"
-        # and admission control as "Disabled" on every such cluster - findings
-        # that were never actually established. UpdateViewData is a no-op:
-        # the refresh succeeds and vCenter still has nothing to give.
-        $blindExt = [pscustomobject]@{ Configuration = $null; Summary = $null }
-        $blindExt | Add-Member -MemberType ScriptMethod -Name UpdateViewData -Value { param() } -Force
+        # and admission control as "Disabled" - findings never established.
         $clusters += [pscustomobject]@{
-            Name               = 'CL-BLIND'
-            HAEnabled          = $true
-            DrsEnabled         = $true
-            DrsAutomationLevel = 'FullyAutomated'
-            EVCMode            = $null
-            ExtensionData      = $blindExt
+            Name          = 'CL-BLIND'
+            MoRef         = 'ClusterComputeResource-domain-c2'
+            Host          = @('HostSystem-host-1')
+            Summary       = $null
+            Configuration = $null
         }
-
         # And one where the view IS populated and EVC genuinely is off, so the
         # WARN still fires where it should.
         $clusters += [pscustomobject]@{
-            Name               = 'CL-NOEVC'
-            HAEnabled          = $true
-            DrsEnabled         = $true
-            DrsAutomationLevel = 'FullyAutomated'
-            EVCMode            = $null
-            ExtensionData      = [pscustomobject]@{
-                Configuration = [pscustomobject]@{ DasConfig = [pscustomobject]@{ AdmissionControlEnabled = $false } }
-                Summary       = [pscustomobject]@{ CurrentEVCModeKey = $null }
+            Name          = 'CL-NOEVC'
+            MoRef         = 'ClusterComputeResource-domain-c3'
+            Host          = @('HostSystem-host-1')
+            Summary       = [pscustomobject]@{ CurrentEVCModeKey = $null }
+            Configuration = [pscustomobject]@{
+                DasConfig = [pscustomobject]@{ Enabled = $true; AdmissionControlEnabled = $false }
+                DrsConfig = [pscustomobject]@{ Enabled = $true; DefaultVmBehavior = 'fullyAutomated' }
             }
         }
     }
     $clusters
 }
 
+function Get-FixtureDatastoreViews {
+    $stores = @([pscustomobject]@{
+        Name    = 'DS-FIXTURE-01'
+        MoRef   = 'Datastore-datastore-1'
+        Host    = @([pscustomobject]@{ Key = 'HostSystem-host-1' })
+        Summary = [pscustomobject]@{ Accessible = $true; Capacity = [int64]4096 * 1GB; FreeSpace = [int64]1800 * 1GB }
+    })
+    if ((Get-FixtureScenario) -eq 'Degraded') {
+        # Summary absent: '-not $null' is true, so this used to be reported as
+        # an inaccessible datastore - a FAIL for a healthy store.
+        $stores += [pscustomobject]@{
+            Name    = 'DS-NOSUMMARY'
+            MoRef   = 'Datastore-datastore-2'
+            Host    = @([pscustomobject]@{ Key = 'HostSystem-host-1' })
+            Summary = $null
+        }
+    }
+    $stores
+}
+
+# The one entry point the health check now uses for inventory. Only the
+# -ViewType / -Property / -Id forms the script actually calls are supported;
+# an unknown ViewType returns nothing rather than pretending.
+function Get-View {
+    [CmdletBinding()]
+    param(
+        [string]   $ViewType,
+        [string[]] $Property,
+        [object]   $Id,
+        $Server
+    )
+
+    if ($Id) {
+        Write-FixtureCall "Get-View:Id"
+        # EnvironmentBrowser lookup: the only -Id call the script makes.
+        $eb = [pscustomobject]@{ MoRef = "$Id" }
+        $eb | Add-Member -MemberType ScriptMethod -Name QueryConfigOptionDescriptor -Value {
+            @(
+                [pscustomobject]@{ Key = 'vmx-17' }
+                [pscustomobject]@{ Key = 'vmx-19' }
+                [pscustomobject]@{ Key = 'vmx-21' }
+            )
+        } -Force
+        return $eb
+    }
+
+    Write-FixtureCall "Get-View:$ViewType"
+    switch ($ViewType) {
+        'HostSystem'             { return (Get-FixtureHostViews -Server $Server) }
+        'VirtualMachine'         { return (Get-FixtureVmViews) }
+        'ClusterComputeResource' { return (Get-FixtureClusterViews) }
+        'Datastore'              { return (Get-FixtureDatastoreViews) }
+        'ComputeResource'        {
+            return @(Get-FixtureClusterViews | ForEach-Object {
+                [pscustomobject]@{
+                    Name               = $_.Name
+                    MoRef              = $_.MoRef
+                    EnvironmentBrowser = "EnvironmentBrowser-$($_.MoRef)"
+                }
+            })
+        }
+        default { return @() }
+    }
+}
+
+# Still PowerCLI objects, and still ONE bulk call each: Get-VM only so
+# Get-Snapshot has something to take, and Get-Snapshot only for snapshot SIZE,
+# which the view layout doesn't expose directly.
+function Get-VM {
+    [CmdletBinding()]
+    param([Parameter(ValueFromPipeline)] $InputObject, $Server)
+    process {
+        Write-FixtureCall 'Get-VM'
+        @(Get-FixtureVmViews | ForEach-Object {
+            [pscustomobject]@{
+                Name          = $_.Name
+                ExtensionData = [pscustomobject]@{ MoRef = $_.MoRef }
+            }
+        })
+    }
+}
+
+function Get-Snapshot {
+    [CmdletBinding()]
+    param($VM)
+    Write-FixtureCall 'Get-Snapshot'
+    @()
+}
+
 Export-ModuleMember -Function Set-PowerCLIConfiguration, Connect-VIServer, Disconnect-VIServer,
-    Get-VMHost, Get-VMHostService, Get-VMHostNtpServer, Get-VMHostSysLogServer, Get-AdvancedSetting,
-    Get-ScsiLun, Get-ScsiLunPath, Get-Datastore, Get-VM, Get-Snapshot, Get-CDDrive, Get-FloppyDrive,
-    Get-Cluster
+    Get-View, Get-VM, Get-Snapshot

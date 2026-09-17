@@ -428,7 +428,7 @@ finally {
  .badge-WARN { background: var(--warn-bg); color: var(--warn); }
  .badge-FAIL { background: var(--crit-bg); color: var(--crit); }
  .badge-INFO { background: var(--info-bg); color: var(--info); }
- tr.hidden, h2.hidden, table.hidden { display: none; }
+ tr.hidden, h2.hidden, table.hidden, .sidebar li.hidden, .sidebar .toc-cat.hidden { display: none; }
  #emptyNote { color: var(--muted); font-style: italic; margin: 12px 0; display: none; }
  .b { font-size: 11px; font-weight: bold; padding: 0 5px; border-radius: 8px; margin-left: 4px; }
  .bFAIL { background: var(--crit-bg); color: var(--crit); }
@@ -553,6 +553,13 @@ $secRows
    var head = document.querySelector('[data-section="' + id + '"]');
    tbl.classList.toggle('hidden', vis === 0);
    if (head) head.classList.toggle('hidden', vis === 0);
+   // The sidebar entry follows its section, so the contents listing shows
+   // only what matches the active filter.
+   var link = document.querySelector('.sidebar [data-jump="' + id + '"]');
+   if (link && link.parentElement) { link.parentElement.classList.toggle('hidden', vis === 0); }
+  });
+  document.querySelectorAll('.sidebar .toc-cat').forEach(function(cat){
+   cat.classList.toggle('hidden', cat.querySelectorAll('li:not(.hidden)').length === 0);
   });
  }
  function apply(filter){
