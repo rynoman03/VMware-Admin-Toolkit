@@ -1132,15 +1132,14 @@ finally {
     $stamp     = Get-Date -Format 'yyyyMMdd-HHmmss'
     $htmlFile  = Join-Path $ReportPath "VMwareHealthCheck-$stamp.html"
 
-    # Styled after a Dell iDRAC-style dashboard: dark navy header/sidebar, a
-    # blue accent, status pill badges, and a stat-tile summary row instead of
-    # a plain text line.
+    # Dashboard-style layout: blue header and sidebar, status pill badges,
+    # and a stat-tile summary row instead of a plain text line.
     $style = @"
 <style>
  :root {
-  /* Every blue in the report is one of the two stops of the iDRAC 10
-     banner gradient, so nothing reads as a second, unrelated blue.
-     --brand (the top stop) is reserved for the banner itself: at 4.14:1 on
+  /* Every blue in the report is one of the two stops of the header
+     gradient, so nothing reads as a second, unrelated blue.
+     --brand (the top stop) is reserved for the header itself: at 4.14:1 on
      the page background it is too light for body-size text. --brand-2 (the
      bottom stop) carries everything else - sidebar, table headers, links,
      borders - and clears AA on light and dark alike. */
