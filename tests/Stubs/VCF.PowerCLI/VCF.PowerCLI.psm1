@@ -257,12 +257,23 @@ function Get-Datastore {
     [CmdletBinding()]
     param([Parameter(ValueFromPipeline)] $InputObject, $Server)
     process {
-        @([pscustomobject]@{
+        $stores = @([pscustomobject]@{
             Name          = 'DS-FIXTURE-01'
             CapacityGB    = 4096.0
             FreeSpaceGB   = 1800.0
             ExtensionData = [pscustomobject]@{ Summary = [pscustomobject]@{ Accessible = $true } }
         })
+        if ((Get-FixtureScenario) -eq 'Degraded') {
+            # Summary absent: '-not $null' is true, so this used to be reported
+            # as an inaccessible datastore - a FAIL for a healthy store.
+            $stores += [pscustomobject]@{
+                Name          = 'DS-NOSUMMARY'
+                CapacityGB    = 2048.0
+                FreeSpaceGB   = 900.0
+                ExtensionData = [pscustomobject]@{ Summary = $null }
+            }
+        }
+        $stores
     }
 }
 
@@ -342,16 +353,50 @@ function Get-FloppyDrive {
 function Get-Cluster {
     [CmdletBinding()]
     param($Server)
-    @([pscustomobject]@{
+    $clusters = @([pscustomobject]@{
         Name               = 'CL-FIXTURE'
         HAEnabled          = $true
         DrsEnabled         = $true
         DrsAutomationLevel = 'FullyAutomated'
+        EVCMode            = $null
         ExtensionData      = [pscustomobject]@{
             Configuration = [pscustomobject]@{ DasConfig = [pscustomobject]@{ AdmissionControlEnabled = $true } }
             Summary       = [pscustomobject]@{ CurrentEVCModeKey = 'intel-skylake' }
         }
     })
+
+    if ((Get-FixtureScenario) -eq 'Degraded') {
+        # A cluster whose view never populates Summary or Configuration.
+        # Treating those $nulls as answers reported EVC as "not configured"
+        # and admission control as "Disabled" on every such cluster - findings
+        # that were never actually established. UpdateViewData is a no-op:
+        # the refresh succeeds and vCenter still has nothing to give.
+        $blindExt = [pscustomobject]@{ Configuration = $null; Summary = $null }
+        $blindExt | Add-Member -MemberType ScriptMethod -Name UpdateViewData -Value { param() } -Force
+        $clusters += [pscustomobject]@{
+            Name               = 'CL-BLIND'
+            HAEnabled          = $true
+            DrsEnabled         = $true
+            DrsAutomationLevel = 'FullyAutomated'
+            EVCMode            = $null
+            ExtensionData      = $blindExt
+        }
+
+        # And one where the view IS populated and EVC genuinely is off, so the
+        # WARN still fires where it should.
+        $clusters += [pscustomobject]@{
+            Name               = 'CL-NOEVC'
+            HAEnabled          = $true
+            DrsEnabled         = $true
+            DrsAutomationLevel = 'FullyAutomated'
+            EVCMode            = $null
+            ExtensionData      = [pscustomobject]@{
+                Configuration = [pscustomobject]@{ DasConfig = [pscustomobject]@{ AdmissionControlEnabled = $false } }
+                Summary       = [pscustomobject]@{ CurrentEVCModeKey = $null }
+            }
+        }
+    }
+    $clusters
 }
 
 Export-ModuleMember -Function Set-PowerCLIConfiguration, Connect-VIServer, Disconnect-VIServer,
