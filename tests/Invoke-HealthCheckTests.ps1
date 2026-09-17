@@ -319,6 +319,42 @@ try {
         ($ghostCons.Count -eq 1 -and $ghostCons[0].Status -eq 'INFO') `
         "got: $($ghostCons.Status) - $($ghostCons.Detail)"
 
+    # A cluster whose view never populates Summary/Configuration must not have
+    # findings invented for it. Reporting "EVC not configured" or "admission
+    # control Disabled" from a $null is claiming an answer that was never
+    # obtained - the same shape as the VM connection-state bug.
+    $blindEvc = Get-ResultRow $r.Rows 'CL-BLIND' 'EVC'
+    Assert-That 'unreadable EVC state is INFO, not a false "not configured"' `
+        ($blindEvc.Count -eq 1 -and $blindEvc[0].Status -eq 'INFO') `
+        "got: $($blindEvc.Status) - $($blindEvc.Detail)"
+
+    $blindAc = Get-ResultRow $r.Rows 'CL-BLIND' 'AdmissionControl'
+    Assert-That 'unreadable admission control is INFO, not a false "Disabled"' `
+        ($blindAc.Count -eq 1 -and $blindAc[0].Status -eq 'INFO') `
+        "got: $($blindAc.Status) - $($blindAc.Detail)"
+
+    # ...but a cluster that genuinely has EVC off must still WARN, so the fix
+    # above cannot have been made by simply never warning.
+    $realNoEvc = Get-ResultRow $r.Rows 'CL-NOEVC' 'EVC'
+    Assert-That 'EVC genuinely off still WARNs' `
+        ($realNoEvc.Count -eq 1 -and $realNoEvc[0].Status -eq 'WARN') `
+        "got: $($realNoEvc.Status) - $($realNoEvc.Detail)"
+
+    $realNoAc = Get-ResultRow $r.Rows 'CL-NOEVC' 'AdmissionControl'
+    Assert-That 'admission control genuinely off still WARNs' `
+        ($realNoAc.Count -eq 1 -and $realNoAc[0].Status -eq 'WARN') `
+        "got: $($realNoAc.Status) - $($realNoAc.Detail)"
+
+    # A datastore with no Summary must not be reported as inaccessible, and
+    # must not be swept into a "all datastores accessible" all-clear either.
+    $dsRow = Get-ResultRow $r.Rows 'esx01.fixture.local' 'DatastoreConnectivity'
+    Assert-That 'datastore with unreadable Summary is not a false FAIL' `
+        ($dsRow.Count -eq 1 -and $dsRow[0].Status -ne 'FAIL') `
+        "got: $($dsRow.Status) - $($dsRow.Detail)"
+    Assert-That 'datastore with unreadable Summary is not a false all-clear' `
+        ($dsRow.Count -eq 1 -and $dsRow[0].Detail -notmatch 'All datastores accessible') `
+        "got: $($dsRow.Status) - $($dsRow.Detail)"
+
     # An absent advanced setting used to read as "password aging disabled".
     $pw = Get-ResultRow $r.Rows 'esx01.fixture.local' 'PasswordExpirationPolicy'
     Assert-That 'absent password setting is INFO, not a false "disabled" WARN' `

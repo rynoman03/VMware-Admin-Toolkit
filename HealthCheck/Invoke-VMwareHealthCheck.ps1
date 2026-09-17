@@ -679,9 +679,17 @@ try {
         Add-Result 'HostHealth' $h.Name 'Uptime' 'INFO' "$uptimeDays days"
 
         # Datastore connectivity - any datastore not accessible from this host
-        $inaccessible = $h | Get-Datastore | Where-Object { -not $_.ExtensionData.Summary.Accessible }
-        if ($inaccessible) {
+        # An unpopulated Summary makes '-not $_...Accessible' true, which would
+        # report a perfectly healthy datastore as inaccessible. Separate the
+        # three cases: definitely inaccessible, definitely fine, and unknown.
+        $dsList       = @($h | Get-Datastore)
+        $inaccessible = @($dsList | Where-Object { $null -ne $_.ExtensionData.Summary -and -not $_.ExtensionData.Summary.Accessible })
+        $dsUnknown    = @($dsList | Where-Object { $null -eq $_.ExtensionData.Summary })
+        if ($inaccessible.Count -gt 0) {
             Add-Result 'HostHealth' $h.Name 'DatastoreConnectivity' 'FAIL' "Inaccessible: $(($inaccessible.Name) -join ',')"
+        } elseif ($dsUnknown.Count -gt 0) {
+            # Saying "all accessible" here would be a false all-clear.
+            Add-Result 'HostHealth' $h.Name 'DatastoreConnectivity' 'INFO' "Accessibility not reported by vCenter for $($dsUnknown.Count) of $($dsList.Count) datastore(s): $(($dsUnknown.Name) -join ',')"
         } else {
             Add-Result 'HostHealth' $h.Name 'DatastoreConnectivity' 'PASS' 'All datastores accessible'
         }
@@ -1123,8 +1131,12 @@ try {
 
         # Admission control (only relevant when HA is on)
         if ($cl.HAEnabled) {
-            $ac = $cl.ExtensionData.Configuration.DasConfig.AdmissionControlEnabled
-            if ($ac) {
+            # Same shape as EVC below: an unpopulated DasConfig must not be
+            # reported as "Disabled" - that is a finding we never established.
+            $dasConfig = $cl.ExtensionData.Configuration.DasConfig
+            if ($null -eq $dasConfig) {
+                Add-Result 'ClusterConfig' $cl.Name 'AdmissionControl' 'INFO' 'Admission control state not reported by vCenter for this cluster'
+            } elseif ($dasConfig.AdmissionControlEnabled) {
                 Add-Result 'ClusterConfig' $cl.Name 'AdmissionControl' 'PASS' 'Enabled - HA holds back enough spare capacity to restart the VMs from a failed host, and blocks power-ons that would eat into that reserve'
             } else {
                 Add-Result 'ClusterConfig' $cl.Name 'AdmissionControl' 'WARN' 'Disabled - HA reserves no spare capacity, so VMs from a failed host may fail to restart if the remaining hosts are already committed'
@@ -1154,9 +1166,28 @@ try {
         # checks below, which also flag things that may be intentional) rather
         # than staying silent - it's generally recommended as a hedge even for
         # same-generation clusters, in case a differing host is added later.
-        $evc = $cl.ExtensionData.Summary.CurrentEVCModeKey
+        # Read the PowerCLI property first - Get-Cluster exposes EVCMode
+        # directly and it doesn't depend on the view's Summary being
+        # populated - then fall back to the view, refreshing it once if it is
+        # absent. A $null used to mean "not configured" unconditionally, which
+        # reports EVERY cluster as unconfigured whenever the property simply
+        # wasn't retrieved: the same shape of bug as the VM connection state.
+        $evc = $cl.EVCMode
+        if (-not $evc) { $evc = $cl.ExtensionData.Summary.CurrentEVCModeKey }
+        if (-not $evc -and $null -eq $cl.ExtensionData.Summary) {
+            try {
+                $cl.ExtensionData.UpdateViewData('Summary')
+                $evc = $cl.ExtensionData.Summary.CurrentEVCModeKey
+            } catch {
+                Write-Verbose "Could not refresh Summary for cluster '$($cl.Name)': $($_.Exception.Message)"
+            }
+        }
+
         if ($evc) {
             Add-Result 'ClusterConfig' $cl.Name 'EVC' 'PASS' "Enhanced vMotion Compatibility enabled, baseline '$evc' (masks host CPUs to a common instruction set so running VMs can vMotion between hosts with different CPU generations)"
+        } elseif ($null -eq $cl.ExtensionData.Summary) {
+            # Not the same as "off": we never got an answer, so don't claim one.
+            Add-Result 'ClusterConfig' $cl.Name 'EVC' 'INFO' 'EVC mode not reported by vCenter for this cluster - could not determine whether it is enabled'
         } else {
             Add-Result 'ClusterConfig' $cl.Name 'EVC' 'WARN' 'Enhanced vMotion Compatibility (masks host CPUs to a common instruction set so running VMs can vMotion between hosts with different CPU generations) is not configured - if hosts have mixed CPU generations, or a differing one is added later, vMotion may fail; consider enabling EVC as a hedge'
         }
