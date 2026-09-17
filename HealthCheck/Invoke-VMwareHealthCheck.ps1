@@ -60,6 +60,27 @@
     newer than vCenter is always FAIL regardless of this value, since that's
     unsupported outright. Default 2.
 
+.PARAMETER ExpectedEsxiBuild
+    The ESXi build number every host is supposed to be running, e.g.
+    -ExpectedEsxiBuild 24859861. Hosts on a lower build are WARN, hosts on a
+    higher one are INFO (ahead of the standard, which is worth knowing but is
+    not a fault). Omit it and the Updates section reports each host's build
+    without judging it.
+
+    Only consulted for hosts that vLCM/Update Manager cannot answer for. Where
+    a host has a patch baseline attached, that baseline is the answer - it is
+    what your own organisation has decided "current" means - and this value is
+    not used for that host.
+
+.PARAMETER ExpectedVCenterBuild
+    The vCenter build number you expect, e.g. -ExpectedVCenterBuild 24322831.
+    Omit it and the Updates section reports vCenter's version and build
+    without judging it.
+
+    There is deliberately no query to the appliance management service on port
+    5480 here: that is a separate endpoint needing its own credentials and its
+    own firewall path, which this script does not ask for and should not need.
+
 .PARAMETER ShowAllConsoleOutput
     Echo every NORMAL and INFO row to the console as it is found, the way the
     script used to. Off by default: on a real estate those rows are the large
@@ -159,6 +180,43 @@
     Both share the columns Category, Object, Check, Status, Detail, and
     are written in a finally block so they are produced even if the run
     errors partway through. Pass -ReportPath to control where they land.
+
+    Checking for available updates (-ExpectedEsxiBuild,
+    -ExpectedVCenterBuild). The Updates section answers "is anything behind?"
+    from whichever of two sources it can, and always says which one it used.
+
+    Source 1, and the one worth having: vSphere Lifecycle Manager / Update
+    Manager baseline compliance. If your hosts have a patch baseline attached,
+    nothing needs configuring here - the section reports each host's
+    compliance against the baselines your organisation already maintains, and
+    stays correct without anyone editing this script. -ExpectedEsxiBuild is
+    not consulted for a host that has a baseline.
+
+    Source 2, for estates that don't use baselines: a build number you supply.
+
+      # What your hosts are actually on. Sorting groups them, so the
+      # stragglers stand out and the majority build is the obvious standard:
+      Connect-VIServer vcenter01.corp.local
+      Get-VMHost | Select-Object Name, Version, Build | Sort-Object Build
+
+      # vCenter's own build:
+      $global:DefaultVIServer | Select-Object Name, Version, Build
+
+    Then pass whichever you want compared:
+
+      .\Invoke-VMwareHealthCheck.ps1 -VCenter vcenter01.corp.local `
+          -ExpectedEsxiBuild 24859861 -ExpectedVCenterBuild 24322831
+
+    Leave them off and the section still lists every build, it just doesn't
+    judge them. A host AHEAD of the expected build is INFO, not WARN - worth
+    knowing, but not a missing update.
+
+    There is deliberately no hardcoded table of current VMware builds in this
+    script. One existed and was removed: it is wrong the day Broadcom ships
+    anything, and a stale table reporting "up to date" is worse than reporting
+    nothing at all. For the same reason nothing here queries the vCenter
+    appliance service on port 5480 - that is a separate endpoint with its own
+    credentials and its own firewall path, which this script does not ask for.
 
     Setting the syslog / NTP baselines (-ExpectedSyslogServer,
     -ExpectedNtpServer). Both are optional: leave them off and those two
@@ -271,7 +329,11 @@ param(
 
     [bool] $TrustAllCertificates    = $true,
 
-    [switch] $ShowAllConsoleOutput
+    [switch] $ShowAllConsoleOutput,
+
+    # See "Checking for available updates" in .NOTES for how to find these.
+    [string] $ExpectedEsxiBuild,
+    [string] $ExpectedVCenterBuild
 )
 
 #region --- Setup -------------------------------------------------------------
@@ -517,6 +579,8 @@ function Format-CheckLabel {
     # Names the generic rules below get wrong, or that have a house spelling.
     $overrides = @{
         'VersionVsVCenter' = 'Version vs vCenter'
+        'VCenterBuild'     = 'vCenter Build'
+        'EsxiPatchLevel'   = 'ESXi Patch Level'
     }
     if ($overrides.ContainsKey($Check)) { return $overrides[$Check] }
 
@@ -1481,6 +1545,115 @@ try {
             Add-Result 'ClusterConfig' $clName 'EVC' 'NORMAL' "Enhanced vMotion Compatibility enabled, baseline '$($cv.Summary.CurrentEVCModeKey)' (masks host CPUs to a common instruction set so running VMs can vMotion between hosts with different CPU generations)"
         } else {
             Add-Result 'ClusterConfig' $clName 'EVC' 'INFO' 'Enhanced vMotion Compatibility (masks host CPUs to a common instruction set so running VMs can vMotion between hosts with different CPU generations) is not configured - fine if every host is the same CPU generation; worth enabling as a hedge before adding a differing host'
+        }
+    }
+    #endregion
+
+    #region --- 5. Updates ----------------------------------------------------
+    Write-Host "`n=== Updates ===" -ForegroundColor Cyan
+
+    # "Is an update available" has no single answer in the vSphere API, so this
+    # section is explicit about WHERE each verdict came from rather than
+    # implying an authority it doesn't have. Two sources, in priority order:
+    #
+    #   1. vLCM / Update Manager baseline compliance, where a baseline is
+    #      attached. This is the real answer: it is what this organisation has
+    #      decided "current" means, and it stays right without anyone editing
+    #      this script.
+    #   2. A build number the admin supplies (-ExpectedEsxiBuild /
+    #      -ExpectedVCenterBuild), for estates that don't use baselines.
+    #
+    # What is deliberately NOT here is a hardcoded table of current VMware
+    # builds. One was tried and removed: it is wrong the day Broadcom ships
+    # anything, and a stale table reporting "up to date" is worse than
+    # reporting nothing.
+    foreach ($conn in $connections) {
+        $vcName = "$($conn.Name)"
+        if ($ExpectedVCenterBuild) {
+            $vcBuild = "$($conn.Build)"
+            if ([string]::IsNullOrWhiteSpace($vcBuild)) {
+                Add-Result 'Updates' $vcName 'VCenterBuild' 'INFO' "vCenter did not report a build number; expected $ExpectedVCenterBuild"
+            } elseif ($vcBuild -eq "$ExpectedVCenterBuild") {
+                Add-Result 'Updates' $vcName 'VCenterBuild' 'NORMAL' "vCenter $($conn.Version) build $vcBuild matches the expected build"
+            } else {
+                Add-Result 'Updates' $vcName 'VCenterBuild' 'WARN' "vCenter $($conn.Version) is on build $vcBuild, expected $ExpectedVCenterBuild - an update may be pending"
+            }
+        } else {
+            Add-Result 'Updates' $vcName 'VCenterBuild' 'INFO' "vCenter $($conn.Version) build $($conn.Build) - pass -ExpectedVCenterBuild to have this compared against your standard"
+        }
+    }
+
+    # One bulk Get-Compliance for every host, not one per host, and only when
+    # the Update Manager module is actually loaded - it ships with PowerCLI but
+    # is not present in every install, and on estates that don't use vLCM there
+    # is nothing for it to read anyway.
+    $complianceByHost = @{}
+    $vumAvailable = $null -ne (Get-Command -Name 'Get-Compliance' -ErrorAction SilentlyContinue)
+    if ($vumAvailable -and $hostEntries.Count -gt 0) {
+        try {
+            $hostMoRefs = New-Object System.Collections.Generic.List[string]
+            foreach ($entry in $hostEntries) { $hostMoRefs.Add("$($entry.View.MoRef)") }
+            foreach ($c in @(Get-Compliance -Entity $hostMoRefs.ToArray() -ErrorAction Stop)) {
+                $k = "$($c.Entity)"
+                if (-not $complianceByHost.ContainsKey($k)) { $complianceByHost[$k] = [System.Collections.Generic.List[object]]::new() }
+                $complianceByHost[$k].Add($c)
+            }
+        } catch {
+            # Never fail the run over this: the section still reports build
+            # numbers, which is what estates without vLCM had anyway.
+            Write-Verbose "Baseline compliance unavailable: $($_.Exception.Message)"
+            $complianceByHost = @{}
+        }
+    }
+
+    foreach ($entry in $hostEntries) {
+        $hv    = $entry.View
+        $hName = $hv.Name
+        if ([string]$hv.Runtime.ConnectionState -ne 'connected') { continue }
+        $hBuild = "$($hv.Config.Product.Build)"
+
+        # vLCM first, where it has something to say about this host.
+        $rows = @($complianceByHost["$($hv.MoRef)"])
+        $rows = @($rows | Where-Object { $_ })
+        if ($rows.Count -gt 0) {
+            $nonCompliant = @($rows | Where-Object { "$($_.Status)" -eq 'NonCompliant' })
+            $incompatible = @($rows | Where-Object { "$($_.Status)" -eq 'Incompatible' })
+            $unknown      = @($rows | Where-Object { "$($_.Status)" -eq 'Unknown' })
+            if ($nonCompliant.Count -gt 0) {
+                $names = Format-LunList -Names @($nonCompliant | ForEach-Object { "$($_.Baseline.Name)" })
+                Add-Result 'Updates' $hName 'EsxiPatchLevel' 'WARN' "Build $hBuild is not compliant with $($nonCompliant.Count) attached baseline(s): $names - updates are available through Lifecycle Manager"
+            } elseif ($incompatible.Count -gt 0) {
+                $names = Format-LunList -Names @($incompatible | ForEach-Object { "$($_.Baseline.Name)" })
+                Add-Result 'Updates' $hName 'EsxiPatchLevel' 'WARN' "Build $hBuild is INCOMPATIBLE with $($incompatible.Count) attached baseline(s): $names - the update cannot be applied as-is and needs looking at"
+            } elseif ($unknown.Count -eq $rows.Count) {
+                Add-Result 'Updates' $hName 'EsxiPatchLevel' 'INFO' "Build $hBuild - baselines are attached but have not been scanned yet, so compliance is unknown (run a scan in Lifecycle Manager)"
+            } else {
+                Add-Result 'Updates' $hName 'EsxiPatchLevel' 'NORMAL' "Build $hBuild is compliant with all $($rows.Count) attached baseline(s)"
+            }
+            continue
+        }
+
+        # No baseline for this host: fall back to the admin-supplied build.
+        if (-not $ExpectedEsxiBuild) {
+            $why = if ($vumAvailable) { 'no patch baseline attached' } else { 'Lifecycle Manager not available from this session' }
+            Add-Result 'Updates' $hName 'EsxiPatchLevel' 'INFO' "Build $hBuild - $why, and no -ExpectedEsxiBuild given, so this build has not been compared against anything"
+            continue
+        }
+        if ([string]::IsNullOrWhiteSpace($hBuild)) {
+            Add-Result 'Updates' $hName 'EsxiPatchLevel' 'INFO' "Host did not report a build number; expected $ExpectedEsxiBuild"
+        } elseif ($hBuild -eq "$ExpectedEsxiBuild") {
+            Add-Result 'Updates' $hName 'EsxiPatchLevel' 'NORMAL' "Build $hBuild matches the expected build"
+        } else {
+            # Numeric where both sides parse, so 24859861 vs 9214924 doesn't
+            # get compared as text. A host AHEAD of the standard is INFO, not
+            # WARN: it is worth knowing, but it is not a missing update.
+            $hNum = 0; $eNum = 0
+            $parsed = [int64]::TryParse($hBuild, [ref]$hNum) -and [int64]::TryParse("$ExpectedEsxiBuild", [ref]$eNum)
+            if ($parsed -and $hNum -gt $eNum) {
+                Add-Result 'Updates' $hName 'EsxiPatchLevel' 'INFO' "Build $hBuild is NEWER than the expected build $ExpectedEsxiBuild - ahead of the standard, not behind it"
+            } else {
+                Add-Result 'Updates' $hName 'EsxiPatchLevel' 'WARN' "Build $hBuild is behind the expected build $ExpectedEsxiBuild - an update is available"
+            }
         }
     }
     #endregion

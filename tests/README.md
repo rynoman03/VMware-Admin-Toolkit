@@ -30,15 +30,28 @@ check what a consumer of the report actually sees.
 | `Healthy` | two connected hosts, everything passing | `0` |
 | `HostDown` | one host `NotResponding` | `2` |
 | `Degraded` | WARN/INFO paths: version skew at the documented boundary, unparsable hardware version, failed LUN query, absent password setting, expiring certificate | `0` |
-| `MultiVCenter` | two vCenters on different versions, each with its own host | `0` |
+| `MultiVCenter` | two vCenters on different versions, each with its own host; no snapshots anywhere | `0` |
+| `VlcmBaselines` | three hosts with vLCM patch baselines attached — one non-compliant, one compliant, one never scanned | `0` |
 | `ConnectFail` | every `Connect-VIServer` throws | `1` |
+
+`Healthy` is also re-run under several argument sets (`-ExpectedEsxiBuild`,
+`-ExpectedVCenterBuild`) to cover the Updates section's build-comparison path.
 
 ## What the assertions are for
 
 They are regression tests. Each one covers a check that once reported the wrong result
-silently — a false PASS, a false all-clear, or a row that vanished from the report
-altogether — rather than failing visibly. Run against the version of the script from before
-those fixes, 14 of the 27 assertions fail.
+silently — a false `NORMAL`, a false all-clear, or a row that vanished from the report
+altogether — rather than failing visibly.
+
+Every assertion is added only after it has been **watched fail** against a variant of the
+script with the fix removed, changing one line so the failure can't be blamed on anything
+else. An assertion that passes against both versions tests nothing, and a whole-script
+comparison proves less than it appears to: an early attempt at one produced twenty failures
+that turned out to be an unrelated crash rather than evidence.
+
+Some assertions count API calls rather than inspect rows. Behavioural assertions alone can't
+notice a refactor that quietly reintroduces a per-host or per-LUN round-trip — the report
+still comes out right, just slowly — so the call log is asserted on directly.
 
 `MultiVCenter` exists because the host-to-vCenter pairing bug only shows up with more than one
 connection; with a single vCenter the old code's fallback masked it, so a single-vCenter
