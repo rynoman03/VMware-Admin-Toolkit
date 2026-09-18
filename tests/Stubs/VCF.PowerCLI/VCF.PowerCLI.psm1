@@ -267,6 +267,7 @@ function New-FixtureVmView {
         [object] $Consolidation = $false,
         [string] $HardwareVersion = 'vmx-19',
         [object] $Snapshot = $null,
+        [string] $ToolsStatus = 'toolsOk',
         [switch] $NoUpdateableRuntime
     )
     $runtime = [pscustomobject]@{
@@ -289,7 +290,7 @@ function New-FixtureVmView {
             ) }
         }
         Guest   = [pscustomobject]@{
-            ToolsStatus = 'toolsOk'
+            ToolsStatus = $ToolsStatus
             Disk        = @([pscustomobject]@{ DiskPath = 'C:\'; FreeSpace = 64GB; Capacity = 120GB })
         }
         Snapshot = $Snapshot
@@ -338,8 +339,15 @@ function Get-FixtureHostView {
             # documented boundary, which is WARN and not FAIL. No storage
             # device data and no password setting, so those checks must report
             # their "couldn't read" paths rather than inventing a result.
-            @( New-FixtureHostView -Name 'esx01.fixture.local' -MoRef 'HostSystem-host-1' `
+            $degraded = @( New-FixtureHostView -Name 'esx01.fixture.local' -MoRef 'HostSystem-host-1' `
                  -Version '6.7.0' -Build '17167734' -CertDaysValid 10 -NoPasswordSetting -NoStorageDevice )
+            # A host whose Runtime.ConnectionState never comes back. An empty
+            # string is not 'connected', so a bare -ne test reported a running
+            # host as FAIL with a detail reading "State is  -".
+            $blind = New-FixtureHostView -Name 'esx-blindstate.fixture.local' -MoRef 'HostSystem-host-9'
+            $blind.Runtime.ConnectionState = $null
+            $degraded += $blind
+            $degraded
         }
         'MultiVCenter' {
             $tag = if ($Server -and $Server.Name) { ($Server.Name -split '\.')[0] } else { 'vcenter-a' }
@@ -368,6 +376,15 @@ function Get-FixtureVmView {
         $ghost.Runtime.ConnectionState     = $null
         $ghost.Runtime.ConsolidationNeeded = $null
         $vms += $ghost
+    }
+
+    if ((Get-FixtureScenario) -eq 'Degraded') {
+        # VMware Tools states. 'not installed' is the single most common
+        # finding on a real estate, so its severity decides whether the
+        # report's critical count means anything.
+        $vms += New-FixtureVmView -Name 'notools01' -MoRef 'VirtualMachine-vm-301' -ToolsStatus 'toolsNotInstalled'
+        $vms += New-FixtureVmView -Name 'toolsoff01' -MoRef 'VirtualMachine-vm-302' -ToolsStatus 'toolsNotRunning'
+        $vms += New-FixtureVmView -Name 'toolsold01' -MoRef 'VirtualMachine-vm-303' -ToolsStatus 'toolsOld'
     }
 
     # A VM carrying a nested snapshot tree: an old root with a recent child.
