@@ -473,6 +473,38 @@ try {
     Assert-That 'certificate inside the warning window is WARN' `
         ($cert.Count -eq 1 -and $cert[0].Status -eq 'WARN') "got: $($cert.Status) - $($cert.Detail)"
 
+    # VMware Tools severity. On a real estate this was 155 of 177 FAIL rows -
+    # the single most common finding there is - which meant the critical count
+    # was dominated by a hygiene item and the handful of genuinely broken
+    # things were buried underneath it.
+    $noTools = Get-ResultRow $r.Rows 'notools01' 'VMwareTools'
+    Assert-That 'a VM with no Tools is WARN, not FAIL' `
+        ($noTools.Count -eq 1 -and $noTools[0].Status -eq 'WARN') "got: $($noTools.Status) - $($noTools.Detail)"
+    Assert-That 'and the detail says what is actually lost' `
+        ($noTools.Count -eq 1 -and $noTools[0].Detail -match 'gracefully' -and $noTools[0].Detail -match 'quiesced') `
+        "got: $($noTools.Detail)"
+    $toolsOff = Get-ResultRow $r.Rows 'toolsoff01' 'VMwareTools'
+    Assert-That 'Tools installed but stopped is WARN' `
+        ($toolsOff.Count -eq 1 -and $toolsOff[0].Status -eq 'WARN') "got: $($toolsOff.Status)"
+    $toolsOld = Get-ResultRow $r.Rows 'toolsold01' 'VMwareTools'
+    Assert-That 'out-of-date Tools is WARN' `
+        ($toolsOld.Count -eq 1 -and $toolsOld[0].Status -eq 'WARN') "got: $($toolsOld.Status)"
+    # The consequence that matters: missing Tools must not make the run look
+    # like an outage to whatever is reading the exit code.
+    Assert-That 'Tools findings alone do not raise the failure exit code' `
+        (@($r.Rows | Where-Object { $_.Check -eq 'VMwareTools' -and $_.Status -eq 'FAIL' }).Count -eq 0) `
+        "got: $(($r.Rows | Where-Object { $_.Check -eq 'VMwareTools' } | ForEach-Object { $_.Status }) -join ', ')"
+
+    # A host whose connection state vCenter never reported. '' is not
+    # 'connected', so a bare -ne test called a running host FAIL and printed
+    # "State is  -" with a hole in it. The VM-side check was fixed for exactly
+    # this; the host-side one still had it.
+    $blind = Get-ResultRow $r.Rows 'esx-blindstate.fixture.local' 'ConnectionState'
+    Assert-That 'an unreported host connection state is INFO, not FAIL' `
+        ($blind.Count -eq 1 -and $blind[0].Status -eq 'INFO') "got: $($blind.Status) - $($blind.Detail)"
+    Assert-That 'and it never prints a blank state' `
+        ($blind.Count -eq 1 -and $blind[0].Detail -notmatch 'State is\s*-') "got: $($blind.Detail)"
+
     # --- MultiVCenter -------------------------------------------------------
     Write-Host "`nScenario: MultiVCenter" -ForegroundColor Cyan
     # Two vCenters on different versions, each with its own host. The managing

@@ -214,6 +214,20 @@ Two things this deliberately does **not** do:
   separate endpoint with its own credentials and its own firewall path. The
   script compares the build it can already see instead.
 
+**What counts as a `FAIL`.** `FAIL` means *broken now* — a host down, a VM
+orphaned or inaccessible, a datastore below the critical threshold, a LUN with
+no active paths left, an expired certificate. `WARN` means *degraded or
+non-standard* — fix it in the normal course of work. The distinction only holds
+if it's applied consistently, so the report's critical count is worth reading.
+
+**VMware Tools** is `WARN`, including when Tools aren't installed at all. The VM
+is running fine; what's missing is manageability — graceful shutdown, quiesced
+backups, heartbeat, and the guest IP and disk figures this report would
+otherwise show. It was briefly a `FAIL`, and on a real estate that turned out to
+be **155 of 177** critical findings, burying the seventeen hosts with a dead
+uplink and the four orphaned VMs underneath a hygiene backlog. A severity every
+estate trips on everywhere isn't a severity.
+
 **Guest drive thresholds are percentages.** `-OSDriveFreeWarnPercent` (default
 15) and `-DataDriveFreeWarnPercent` (default 10) flag a volume by how full it
 is, not by absolute GB. 20GB free is comfortable on a 1TB data disk and nearly

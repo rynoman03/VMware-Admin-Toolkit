@@ -749,11 +749,23 @@ try {
         $hostIdx++
         Write-HealthCheckProgress -Activity 'Host health' -Current $hostIdx -Total $hostEntries.Count -Item $hName
 
-        # Connection / power state
-        if ([string]$hv.Runtime.ConnectionState -ne 'connected') {
+        # Connection / power state.
+        # A $null state is NOT a disconnected host - it is a property vCenter
+        # did not return, and reporting it as FAIL produced a red row whose
+        # detail read "State is  -" with nothing in it. The VM-side check was
+        # fixed for this; the host-side one was not. Either way the remaining
+        # checks are skipped, because they read host-side config that cannot be
+        # trusted in an unknown state - but the row says which of the two
+        # happened.
+        $hState = [string]$hv.Runtime.ConnectionState
+        if ([string]::IsNullOrWhiteSpace($hState)) {
+            Add-Result 'HostHealth' $hName 'ConnectionState' 'INFO' 'Connection state not reported by vCenter for this host - remaining host checks skipped'
+            continue
+        }
+        if ($hState -ne 'connected') {
             # Every check below reads host-side config that vCenter cannot
             # refresh in this state, so the values would be stale or absent.
-            Add-Result 'HostHealth' $hName 'ConnectionState' 'FAIL' "State is $($hv.Runtime.ConnectionState) - remaining host checks skipped"
+            Add-Result 'HostHealth' $hName 'ConnectionState' 'FAIL' "State is $hState - remaining host checks skipped"
             continue
         }
         Add-Result 'HostHealth' $hName 'ConnectionState' 'NORMAL' 'Connected'
@@ -1282,8 +1294,16 @@ try {
             switch ($toolsStatus) {
                 'toolsOk'          { Add-Result 'VMCompliance' $vmName 'VMwareTools' 'NORMAL' 'toolsOk' }
                 'toolsOld'         { Add-Result 'VMCompliance' $vmName 'VMwareTools' 'WARN' 'Tools out of date' }
-                'toolsNotRunning'  { Add-Result 'VMCompliance' $vmName 'VMwareTools' 'WARN' 'Tools not running' }
-                'toolsNotInstalled'{ Add-Result 'VMCompliance' $vmName 'VMwareTools' 'FAIL' 'Tools not installed' }
+                'toolsNotRunning'  { Add-Result 'VMCompliance' $vmName 'VMwareTools' 'WARN' 'Tools installed but not running - no graceful shutdown, no quiesced backup, and no guest IP or disk data in this report' }
+                # WARN, not FAIL. A VM with no Tools is running fine - what is
+                # missing is manageability: graceful shutdown, quiesced
+                # backups, heartbeat, and the guest disk figures this report
+                # would otherwise show. That is a backlog item, not an outage,
+                # and grading it FAIL put it in the same bucket as an orphaned
+                # VM or a fully offline LUN. On a real estate it is also one of
+                # the most common findings there is, so as a FAIL it buried
+                # every genuine failure underneath it.
+                'toolsNotInstalled'{ Add-Result 'VMCompliance' $vmName 'VMwareTools' 'WARN' 'VMware Tools not installed - the VM runs, but it cannot be shut down gracefully, backed up with a quiesced snapshot, or report its guest IP and disk usage' }
                 default            { Add-Result 'VMCompliance' $vmName 'VMwareTools' 'INFO' "$toolsStatus" }
             }
 
