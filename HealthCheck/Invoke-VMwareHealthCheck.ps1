@@ -339,6 +339,13 @@ param(
 #region --- Setup -------------------------------------------------------------
 
 # Collected results. Each row: Category, Object, Check, Status (NORMAL/WARN/FAIL/INFO), Detail
+# Stamped into the console banner and the report header. A report that cannot
+# say which version of the script produced it makes "is this the fixed copy?"
+# unanswerable - the script gets copied to jump boxes and scheduled tasks, and
+# those copies go stale silently. Bump this whenever a change alters what the
+# report says.
+$script:ScriptVersion = '1.4.0'
+
 $script:Results = New-Object System.Collections.Generic.List[object]
 $script:ShowAllRows = [bool]$ShowAllConsoleOutput
 $script:QuietRows   = 0
@@ -630,7 +637,8 @@ try {
     # report (via Add-Result below) instead of only the console, and so the
     # finally block still runs (and produces a report) even if every
     # connection fails.
-    Write-Host "`nConnecting to vCenter(s): $($VCenter -join ', ')" -ForegroundColor Cyan
+    Write-Host "`nVMware Health Check v$($script:ScriptVersion)" -ForegroundColor Cyan
+    Write-Host "Connecting to vCenter(s): $($VCenter -join ', ')" -ForegroundColor Cyan
     foreach ($vc in $VCenter) {
         try {
             $params = @{ Server = $vc; ErrorAction = 'Stop' }
@@ -1984,7 +1992,7 @@ finally {
 <title>VMware Health Check $stamp</title></head><body>
 <header class="topbar">
  <div class="topbar-brand"><span class="brand-badge">HC</span><span class="brand-title">VMware Health &amp; Compliance Report</span></div>
- <div class="topbar-meta">Generated $(Get-Date) &nbsp;&bull;&nbsp; vCenter(s): $([System.Net.WebUtility]::HtmlEncode($VCenter -join ', '))</div>
+ <div class="topbar-meta">v$($script:ScriptVersion) &nbsp;&bull;&nbsp; Generated $(Get-Date) &nbsp;&bull;&nbsp; vCenter(s): $([System.Net.WebUtility]::HtmlEncode($VCenter -join ', '))</div>
 </header>
 <div class="layout">
  <nav class="sidebar">
