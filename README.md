@@ -214,6 +214,13 @@ Two things this deliberately does **not** do:
   separate endpoint with its own credentials and its own firewall path. The
   script compares the build it can already see instead.
 
+**Every report says which version produced it.** The console banner and the
+report header both carry the script version (`v1.4.0`). This script gets copied
+onto jump boxes and into scheduled tasks, and those copies go stale silently —
+without a stamp, a report full of findings that were already fixed is
+indistinguishable from a regression. If a result looks wrong, check the version
+in the header before anything else.
+
 **What counts as a `FAIL`.** `FAIL` means *broken now* — a host down, a VM
 orphaned or inaccessible, a datastore below the critical threshold, a LUN with
 no active paths left, an expired certificate. `WARN` means *degraded or

@@ -176,6 +176,19 @@ try {
     Assert-That 'exits 0 when nothing FAILs' ($r.ExitCode -eq 0) "exit code was $($r.ExitCode)"
     Assert-That 'writes an HTML report' ($null -ne $r.Html)
     Assert-That 'writes a CSV report'   ($null -ne $r.Csv)
+
+    # The report has to say which version of the script produced it. Without
+    # that, a stale copy on a jump box is indistinguishable from the current
+    # one - a report showing findings that were already fixed reads as a
+    # regression rather than as an out-of-date script. Matched from the script
+    # itself so the assertion cannot drift from the value it is checking.
+    $declared = (Select-String -Path $ScriptPath -Pattern "^\`$script:ScriptVersion\s*=\s*'([^']+)'" |
+                    Select-Object -First 1).Matches[0].Groups[1].Value
+    Assert-That 'the script declares a version' `
+        (-not [string]::IsNullOrWhiteSpace($declared)) "got: '$declared'"
+    $htmlText = Get-Content -LiteralPath $r.Html.FullName -Raw
+    Assert-That 'the HTML report stamps the script version in its header' `
+        ($htmlText -match ([regex]::Escape("v$declared"))) "version '$declared' not found in the report header"
     Assert-That 'no FAIL rows' (@($r.Rows | Where-Object { $_.Status -eq 'FAIL' }).Count -eq 0) `
         (($r.Rows | Where-Object { $_.Status -eq 'FAIL' } | ForEach-Object { "$($_.Object)/$($_.Check)" }) -join ', ')
 
