@@ -249,19 +249,33 @@
     Quote a syslog value (it contains '://'); NTP servers need no quotes.
     Pass several by comma-separating them.
 
-    Step 3 (optional) - if you always check the same environment, give the
-    parameters a default in the param() block below instead of typing them
-    every run:
+    Step 3 (optional) - if you always check the same environment and don't
+    want to retype the baselines, put them in a WRAPPER script beside this
+    one rather than editing the param() block below:
 
-      [string[]] $ExpectedSyslogServer = 'udp://loghost01.corp.local:514',
-      [string[]] $ExpectedNtpServer    = @('10.10.0.10','10.10.0.11'),
+      # Run-SiteHealthCheck.ps1 - this site's settings; edit freely.
+      & "$PSScriptRoot\Invoke-VMwareHealthCheck.ps1" `
+          -VCenter              vcenter01.corp.local `
+          -ExpectedSyslogServer 'udp://loghost01.corp.local:514' `
+          -ExpectedNtpServer    10.10.0.10, 10.10.0.11 `
+          -ReportPath           C:\Reports `
+          @args
+      exit $LASTEXITCODE
 
-    Two consequences worth knowing before you do: the checks stop being
-    opt-in, so a run against a DIFFERENT vCenter with its own collector
-    will WARN on every host; and to switch the comparison off for a single
-    run you then have to pass an empty array, -ExpectedSyslogServer @().
-    If you point this at more than one environment, leaving the defaults
-    empty and passing the value per run stays cleaner.
+    Then run .\Run-SiteHealthCheck.ps1, and pass extra arguments straight
+    through: .\Run-SiteHealthCheck.ps1 -ShowAllConsoleOutput
+
+    Why a wrapper and not a default in param(): this file gets updated. Local
+    edits to it mean every 'git pull' is a merge, and a half-applied merge
+    leaves a script that no longer parses - a stray comma in param() is a
+    syntax error with no obvious connection to what you actually changed. The
+    wrapper is yours, never changes upstream, and 'exit $LASTEXITCODE' keeps
+    the exit codes below working for a scheduler.
+
+    If you do set a default in param() anyway, know that the check stops
+    being opt-in: a run against a DIFFERENT vCenter with its own collector
+    will WARN on every host, and switching the comparison off for one run
+    then means passing an empty array, -ExpectedSyslogServer @().
 
     Matching is deliberately forgiving so equivalent spellings don't read as
     drift: a udp:// / tcp:// / ssl:// prefix is ignored, comparison is
@@ -344,7 +358,7 @@ param(
 # unanswerable - the script gets copied to jump boxes and scheduled tasks, and
 # those copies go stale silently. Bump this whenever a change alters what the
 # report says.
-$script:ScriptVersion = '1.5.0'
+$script:ScriptVersion = '1.5.1'
 
 $script:Results = New-Object System.Collections.Generic.List[object]
 $script:ShowAllRows = [bool]$ShowAllConsoleOutput
