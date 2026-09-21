@@ -81,6 +81,26 @@
     5480 here: that is a separate endpoint needing its own credentials and its
     own firewall path, which this script does not ask for and should not need.
 
+.PARAMETER IncludeToolsVibVersion
+    Read the VMware Tools package (the 'tools-light' VIB) each ESXi host ships
+    to its VMs, and flag hosts whose copy is older than the newest one in the
+    estate.
+
+    OFF BY DEFAULT, because it is the one check here that costs a round trip
+    PER HOST. Everything else in this script reads from bulk property
+    collector calls; this reaches into each host through esxcli, which is the
+    only place the VIB list is exposed - it is not in the vSphere API. On a
+    large estate expect this to add minutes to the run, so it suits an
+    occasional audit rather than a scheduled health check.
+
+    Nothing is hardcoded: each host is compared against the newest tools-light
+    version found on any host in this run. A host behind that is WARN and can
+    be brought level by patching it. If every host is on the same version they
+    are all NORMAL, which is the correct answer even if that version is old -
+    this check answers "are my hosts consistent" and vLCM baselines
+    (-ExpectedEsxiBuild, or an attached patch baseline) answer "are my hosts
+    current".
+
 .PARAMETER ShowAllConsoleOutput
     Echo every NORMAL and INFO row to the console as it is found, the way the
     script used to. Off by default: on a real estate those rows are the large
@@ -347,7 +367,9 @@ param(
 
     # See "Checking for available updates" in .NOTES for how to find these.
     [string] $ExpectedEsxiBuild,
-    [string] $ExpectedVCenterBuild
+    [string] $ExpectedVCenterBuild,
+
+    [switch] $IncludeToolsVibVersion
 )
 
 #region --- Setup -------------------------------------------------------------
@@ -358,7 +380,7 @@ param(
 # unanswerable - the script gets copied to jump boxes and scheduled tasks, and
 # those copies go stale silently. Bump this whenever a change alters what the
 # report says.
-$script:ScriptVersion = '1.5.1'
+$script:ScriptVersion = '1.6.0'
 
 $script:Results = New-Object System.Collections.Generic.List[object]
 $script:ShowAllRows = [bool]$ShowAllConsoleOutput
@@ -601,6 +623,31 @@ function Format-LunList {
 # categories whose rows are all one kind of thing get a specific name;
 # Capacity (datastores and clusters) and Updates (vCenter and hosts) stay
 # generic rather than mislabel half their rows.
+# Orders two VIB version strings such as '12.4.5-23787635' or
+# '11.3.5.18557794-20036586'. Split on the punctuation and compare piece by
+# piece, numerically where both pieces are numbers - a plain string compare
+# puts '9' after '12', which would report the newest host in the estate as the
+# one that is behind. Returns -1, 0 or 1.
+function Compare-VibVersion {
+    param([string] $Left, [string] $Right)
+    if ($Left -eq $Right) { return 0 }
+    $lp = @($Left  -split '[^0-9A-Za-z]+' | Where-Object { $_ -ne '' })
+    $rp = @($Right -split '[^0-9A-Za-z]+' | Where-Object { $_ -ne '' })
+    $n  = [math]::Max($lp.Count, $rp.Count)
+    for ($i = 0; $i -lt $n; $i++) {
+        $a = if ($i -lt $lp.Count) { $lp[$i] } else { '0' }
+        $b = if ($i -lt $rp.Count) { $rp[$i] } else { '0' }
+        $an = 0; $bn = 0
+        if ([int64]::TryParse($a, [ref]$an) -and [int64]::TryParse($b, [ref]$bn)) {
+            if ($an -ne $bn) { return $(if ($an -lt $bn) { -1 } else { 1 }) }
+        } else {
+            $c = [string]::Compare($a, $b, $true)
+            if ($c -ne 0) { return $(if ($c -lt 0) { -1 } else { 1 }) }
+        }
+    }
+    return 0
+}
+
 function Format-ObjectColumnLabel {
     param([string] $Category)
     switch ($Category) {
@@ -621,6 +668,7 @@ function Format-CheckLabel {
         'VCenterBuild'     = 'vCenter Build'
         'EsxiPatchLevel'   = 'ESXi Patch Level'
         'VMToolsBacklog'   = 'VM Tools Backlog'
+        'ToolsVibVersion'  = 'Host Tools Package'
     }
     if ($overrides.ContainsKey($Check)) { return $overrides[$Check] }
 
@@ -1807,6 +1855,83 @@ try {
             Add-Result 'Updates' $hName 'VMToolsBacklog' 'WARN' "$summary - most of this host's VMs report out-of-date Tools, which usually means the host's own bundled Tools package is behind; patching the host updates them all"
         } else {
             Add-Result 'Updates' $hName 'VMToolsBacklog' 'INFO' "$summary - listed per VM under VM Compliance > VMware Tools"
+        }
+    }
+
+    # The Tools package each host ships to its VMs ('tools-light'), opt-in.
+    #
+    # This is the one check in the script that costs a round trip PER HOST.
+    # The VIB list is not in the vSphere API at all - esxcli is the only place
+    # it is exposed - so there is no bulk form of this and no way to fold it
+    # into the property collector calls everything else uses. Hence the
+    # switch, and hence the warning about what it costs.
+    if ($IncludeToolsVibVersion) {
+        $connectedHosts = @($hostEntries | Where-Object { [string]$_.View.Runtime.ConnectionState -eq 'connected' })
+        if ($connectedHosts.Count -gt 0) {
+            Write-Host "  Reading the Tools package from $($connectedHosts.Count) host(s) over esxcli - this is per-host and slow..." -ForegroundColor DarkGray
+        }
+
+        # One bulk Get-VMHost per connection: Get-EsxCli needs PowerCLI host
+        # objects, and fetching them one at a time would double the per-host
+        # cost this check already carries.
+        $pcliHostByMoRef = @{}
+        foreach ($conn in $connections) {
+            $ids = @($connectedHosts | Where-Object { "$($_.VCenter)" -eq "$conn" } | ForEach-Object { "$($_.View.MoRef)" })
+            if ($ids.Count -eq 0) { continue }
+            try {
+                foreach ($ph in @(Get-VMHost -Id $ids -Server $conn -ErrorAction Stop)) {
+                    $pcliHostByMoRef["$conn|$($ph.ExtensionData.MoRef)"] = $ph
+                }
+            } catch {
+                Write-Warning "Could not retrieve host objects from $conn for the Tools package check: $($_.Exception.Message)"
+            }
+        }
+
+        $vibByHost = @{}    # host name -> version string
+        $vibIdx    = 0
+        foreach ($entry in $connectedHosts) {
+            $hv    = $entry.View
+            $hName = $hv.Name
+            $vibIdx++
+            Write-HealthCheckProgress -Activity 'Host Tools package' -Current $vibIdx -Total $connectedHosts.Count -Item $hName
+            $ph = $pcliHostByMoRef["$($entry.VCenter)|$($hv.MoRef)"]
+            if ($null -eq $ph) {
+                Add-Result 'Updates' $hName 'ToolsVibVersion' 'INFO' 'Could not retrieve a host object to query esxcli with'
+                continue
+            }
+            try {
+                $esxcli = Get-EsxCli -VMHost $ph -V2 -ErrorAction Stop
+                $vib = @($esxcli.software.vib.list.Invoke() | Where-Object { $_.Name -eq 'tools-light' })
+                if ($vib.Count -eq 0) {
+                    # Not a finding: some images genuinely carry no
+                    # tools-light VIB, and "absent" is not "old".
+                    Add-Result 'Updates' $hName 'ToolsVibVersion' 'INFO' "No 'tools-light' VIB present on this host"
+                } else {
+                    $vibByHost[$hName] = "$($vib[0].Version)"
+                }
+            } catch {
+                # esxcli needs the host reachable and the account privileged.
+                # Failing to ask is not evidence the host is behind.
+                Add-Result 'Updates' $hName 'ToolsVibVersion' 'INFO' "Could not read the Tools package over esxcli: $($_.Exception.Message)"
+            }
+        }
+
+        if ($vibByHost.Count -gt 0) {
+            # The newest version seen ANYWHERE in this run is the yardstick.
+            # Nothing is hardcoded, so there is no table here to go stale -
+            # the same reason this script has no list of current ESXi builds.
+            $newest = $null
+            foreach ($v in $vibByHost.Values) {
+                if ($null -eq $newest -or (Compare-VibVersion -Left $v -Right $newest) -gt 0) { $newest = $v }
+            }
+            foreach ($hName in $vibByHost.Keys) {
+                $v = $vibByHost[$hName]
+                if ((Compare-VibVersion -Left $v -Right $newest) -lt 0) {
+                    Add-Result 'Updates' $hName 'ToolsVibVersion' 'WARN' "Tools package $v is older than $newest, which $(@($vibByHost.Values | Where-Object { $_ -eq $newest }).Count) other host(s) in this run carry - VMs installing Tools from this host get the older build; patch the host to bring it level"
+                } else {
+                    Add-Result 'Updates' $hName 'ToolsVibVersion' 'NORMAL' "Tools package $v - the newest seen across the $($vibByHost.Count) host(s) read in this run"
+                }
+            }
         }
     }
     #endregion

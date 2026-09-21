@@ -247,7 +247,7 @@ Two things this deliberately does **not** do:
   script compares the build it can already see instead.
 
 **Every report says which version produced it.** The console banner and the
-report header both carry the script version (`v1.5.1`). This script gets copied
+report header both carry the script version (`v1.6.0`). This script gets copied
 onto jump boxes and into scheduled tasks, and those copies go stale silently —
 without a stamp, a report full of findings that were already fixed is
 indistinguishable from a regression. If a result looks wrong, check the version
@@ -290,10 +290,28 @@ Compliance › VMware Tools*, and repeating them as findings would double-count
 the same backlog into the attention view. Costs no extra API calls; it's a
 regroup of data the VM views already carry.
 
-Host-side: the exact Tools VIB version an ESXi host ships **isn't exposed by the
-vSphere API** — reading it needs `esxcli software vib list`, a per-host shell
-call this script deliberately doesn't make. The majority-outdated signal above is
-the reachable proxy for it.
+**The host's actual Tools package — `-IncludeToolsVibVersion`.** The version of
+the `tools-light` VIB a host ships to its VMs. **Off by default**, because it's
+the one check here that costs a round trip *per host*: the VIB list isn't in the
+vSphere API at all, and `esxcli` is the only place it's exposed, so there's no
+bulk form of it. On a large estate expect it to add minutes — an occasional
+audit, not something to put in a scheduled run.
+
+```powershell
+.\HealthCheck\Invoke-VMwareHealthCheck.ps1 -VCenter vcenter01.corp.local -IncludeToolsVibVersion
+```
+
+Nothing is hardcoded. Each host is compared against **the newest version found
+on any host in the same run** — hosts behind it are `WARN` and can be brought
+level by patching. If every host matches, they're all `NORMAL`, which is the
+right answer even if that version is old: this check answers *"are my hosts
+consistent"*, and vLCM baselines answer *"are my hosts current"*. Versions are
+compared component-wise and numerically, so build `9999999` correctly sorts
+*before* `23787635` rather than after it the way plain text would.
+
+A host `esxcli` can't be reached on, or that carries no `tools-light` VIB at
+all, is `INFO` naming the reason — failing to ask is not evidence a host is
+behind.
 
 **VMware Tools** is `WARN`, including when Tools aren't installed at all. The VM
 is running fine; what's missing is manageability — graceful shutdown, quiesced
