@@ -344,7 +344,7 @@ param(
 # unanswerable - the script gets copied to jump boxes and scheduled tasks, and
 # those copies go stale silently. Bump this whenever a change alters what the
 # report says.
-$script:ScriptVersion = '1.4.0'
+$script:ScriptVersion = '1.4.1'
 
 $script:Results = New-Object System.Collections.Generic.List[object]
 $script:ShowAllRows = [bool]$ShowAllConsoleOutput
@@ -580,6 +580,24 @@ function Format-LunList {
 # ('CertificateExpiry'), which the narrow sidebar has to break mid-word; spacing
 # them lets the column wrap at word boundaries instead. Only the sidebar uses
 # this - section headings keep the raw name, which matches the CSV.
+# What the first column of a section's table is actually listing. Every
+# section used to head it 'Object', which is the CSV's column name but not a
+# word anyone scans for: on a page of seventeen hosts with a dead uplink, the
+# question being asked is "which host?", and the heading should say so. Only
+# categories whose rows are all one kind of thing get a specific name;
+# Capacity (datastores and clusters) and Updates (vCenter and hosts) stay
+# generic rather than mislabel half their rows.
+function Format-ObjectColumnLabel {
+    param([string] $Category)
+    switch ($Category) {
+        'HostHealth'    { 'Host' }
+        'VMCompliance'  { 'VM' }
+        'ClusterConfig' { 'Cluster' }
+        'Connection'    { 'vCenter' }
+        default         { 'Object' }
+    }
+}
+
 function Format-CheckLabel {
     param([string] $Check)
 
@@ -1022,28 +1040,36 @@ try {
             $deadSwitches  = New-Object System.Collections.Generic.List[object]
             $thinSwitches  = New-Object System.Collections.Generic.List[object]
             foreach ($sw in $switches) {
-                $up = 0
+                if (@($sw.Keys).Count -eq 0) { continue }
+                $up   = 0
+                $dead = New-Object System.Collections.Generic.List[object]
                 foreach ($k in $sw.Keys) {
                     $pnic = $pnicByKey[[string]$k]
                     if ($null -eq $pnic) { continue }
-                    if ($null -eq $pnic.LinkSpeed) {
-                        $downUplinks.Add("$($pnic.Device) on $($sw.Name)")
-                    } else {
-                        $up++
-                    }
+                    if ($null -eq $pnic.LinkSpeed) { $dead.Add("$($pnic.Device)") } else { $up++ }
                 }
-                if ($sw.Keys.Count -eq 0) { continue }
                 if ($up -eq 0) {
-                    $deadSwitches.Add("$($sw.Name) (0 of $($sw.Keys.Count) uplink(s) up)")
-                } elseif ($up -lt 2) {
-                    $thinSwitches.Add("$($sw.Name) ($up of $($sw.Keys.Count) uplink(s) up)")
+                    # Name the NICs here too. These were collected and then
+                    # thrown away: a fully dead switch took the branch that
+                    # prints only the switch and a count, so the FAIL row said
+                    # LESS than the WARN row below it, and whoever picked it up
+                    # had to log into the host to find out which cable to look
+                    # at. The urgent row should be the actionable one.
+                    $which = if ($dead.Count -gt 0) { ": $(Format-LunList -Names $dead -MaxShown 6) with no link" } else { '' }
+                    $deadSwitches.Add("$($sw.Name)$which (0 of $(@($sw.Keys).Count) uplink(s) up)")
+                } else {
+                    foreach ($d in $dead) { $downUplinks.Add("$d on $($sw.Name)") }
+                    if ($up -lt 2) {
+                        $thinSwitches.Add("$($sw.Name) ($up of $(@($sw.Keys).Count) uplink(s) up)")
+                    }
                 }
             }
 
             if ($switches.Count -eq 0) {
                 Add-Result 'HostHealth' $hName 'NicLinkState' 'INFO' 'No virtual switches reported for this host'
             } elseif ($deadSwitches.Count -gt 0) {
-                Add-Result 'HostHealth' $hName 'NicLinkState' 'FAIL' "Switch(es) with no uplink carrying link: $($deadSwitches -join ', ') - that traffic is down; check the cables and physical switch ports"
+                $also = if ($downUplinks.Count -gt 0) { " Also down elsewhere: $($downUplinks -join ', ')." } else { '' }
+                Add-Result 'HostHealth' $hName 'NicLinkState' 'FAIL' "Switch(es) with no uplink carrying link: $($deadSwitches -join ', ') - that traffic is down; check the cables and physical switch ports.$also"
             } elseif ($downUplinks.Count -gt 0) {
                 Add-Result 'HostHealth' $hName 'NicLinkState' 'WARN' "Uplink(s) with no link: $($downUplinks -join ', ') - still carrying traffic on the remaining uplink(s); check the cable and the physical switch port"
             } else {
@@ -1974,7 +2000,8 @@ finally {
         [void]$sb.Append($sec.Cat).Append(' &rsaquo; ').Append($sec.Check)
         [void]$sb.Append(' <span class="seccount">(').Append($sec.Rows.Count).Append(')</span>')
         [void]$sb.AppendLine(' <a class="backtop" href="#top">&uarr; top</a></h2>')
-        [void]$sb.Append('<table data-section-table="').Append($sec.Id).AppendLine('"><tr><th>Object</th><th>Status</th><th>Detail</th></tr>')
+        [void]$sb.Append('<table data-section-table="').Append($sec.Id).Append('"><tr><th>')
+        [void]$sb.Append((Format-ObjectColumnLabel $sec.Cat)).AppendLine('</th><th>Status</th><th>Detail</th></tr>')
         foreach ($row in $sec.Rows) {
             $st = $row.Status
             [void]$sb.Append("<tr data-status='").Append($st).Append("'><td>")

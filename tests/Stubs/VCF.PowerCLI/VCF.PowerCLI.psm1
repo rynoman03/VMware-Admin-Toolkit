@@ -240,10 +240,20 @@ function New-FixtureHostView {
                     # Unassigned NIC with no cable: normal, and must NOT be
                     # reported - flagging spare NICs would bury the real one.
                     [pscustomobject]@{ Key = 'key-vim.host.PhysicalNic-vmnic7'; Device = 'vmnic7'; LinkSpeed = $null }
+                    # DeadSwitch: both uplinks of a second switch are down, so
+                    # that switch's traffic is actually off the network. The
+                    # report has to name vmnic4 and vmnic5 - a switch name and
+                    # a count is not something anyone can act on.
+                    [pscustomobject]@{ Key = 'key-vim.host.PhysicalNic-vmnic4'; Device = 'vmnic4'
+                                       LinkSpeed = if ((Get-FixtureScenario) -eq 'DeadSwitch') { $null } else { [pscustomobject]@{ SpeedMb = 10000 } } }
+                    [pscustomobject]@{ Key = 'key-vim.host.PhysicalNic-vmnic5'; Device = 'vmnic5'
+                                       LinkSpeed = if ((Get-FixtureScenario) -eq 'DeadSwitch') { $null } else { [pscustomobject]@{ SpeedMb = 10000 } } }
                 )
                 Vswitch = @(
                     [pscustomobject]@{ Name = 'vSwitch0'; Pnic = @(
                         'key-vim.host.PhysicalNic-vmnic0', 'key-vim.host.PhysicalNic-vmnic1') }
+                    [pscustomobject]@{ Name = 'vSwitch1'; Pnic = @(
+                        'key-vim.host.PhysicalNic-vmnic4', 'key-vim.host.PhysicalNic-vmnic5') }
                 )
                 ProxySwitch = @()
                 DnsConfig   = [pscustomobject]@{ Address = @('10.10.0.5', '10.10.0.6') }

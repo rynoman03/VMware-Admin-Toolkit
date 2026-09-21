@@ -550,6 +550,41 @@ try {
         (@($r.Calls | Where-Object { $_ -like 'Get-VM*' -or $_ -eq 'Get-Snapshot' }).Count -eq 0) `
         "got: $($r.Calls -join ', ')"
 
+    # --- DeadSwitch ---------------------------------------------------------
+    # A switch with every uplink down is the most urgent networking finding
+    # the script produces, and it used to be the least actionable: the FAIL
+    # branch printed the switch and a count while the WARN branch below it
+    # named the actual NICs. Whoever picked it up had to log into the host to
+    # learn which cable to look at.
+    Write-Host "`nScenario: DeadSwitch" -ForegroundColor Cyan
+    $r = Invoke-Scenario 'DeadSwitch'
+    Assert-That 'exits 2 when a switch has no uplinks left' ($r.ExitCode -eq 2) "exit code was $($r.ExitCode)"
+    $nic = Get-ResultRow $r.Rows 'esx01.fixture.local' 'NicLinkState'
+    Assert-That 'a switch with every uplink down is FAIL' `
+        ($nic.Count -eq 1 -and $nic[0].Status -eq 'FAIL') "got: $($nic.Status) - $($nic.Detail)"
+    Assert-That 'and names the switch' `
+        ($nic.Count -eq 1 -and $nic[0].Detail -match 'vSwitch1') "got: $($nic.Detail)"
+    Assert-That 'and names every NIC that lost link, not just a count' `
+        ($nic.Count -eq 1 -and $nic[0].Detail -match 'vmnic4' -and $nic[0].Detail -match 'vmnic5') `
+        "got: $($nic.Detail)"
+    # The spare NIC rule still holds: an unassigned NIC with no cable is
+    # normal and must not be dragged into the finding.
+    Assert-That 'the unassigned spare NIC is still not reported' `
+        ($nic.Count -eq 1 -and $nic[0].Detail -notmatch 'vmnic7') "got: $($nic.Detail)"
+    # The healthy switch on the same host must not appear in the finding.
+    Assert-That 'the switch that still has link is not named as down' `
+        ($nic.Count -eq 1 -and $nic[0].Detail -notmatch 'vSwitch0') "got: $($nic.Detail)"
+
+    # The first column of each section should say what it lists. 'Object' is
+    # the CSV's column name, not a word anyone scans a page of hosts for.
+    $htmlText = Get-Content -LiteralPath $r.Html.FullName -Raw
+    Assert-That 'host sections head their first column Host, not Object' `
+        ($htmlText -match '<table data-section-table="sec-HostHealth[^"]*"><tr><th>Host</th>') `
+        'no host section table headed "Host"'
+    Assert-That 'VM sections head theirs VM' `
+        ($htmlText -match '<table data-section-table="sec-VMCompliance[^"]*"><tr><th>VM</th>') `
+        'no VM section table headed "VM"'
+
     # --- Updates ------------------------------------------------------------
     # "Is an update available" has no single source of truth in the vSphere
     # API, so the section has to be explicit about which source produced each
