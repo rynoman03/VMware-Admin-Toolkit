@@ -32,6 +32,7 @@ check what a consumer of the report actually sees.
 | `Degraded` | WARN/INFO paths: version skew at the documented boundary, unparsable hardware version, failed LUN query, absent password setting, expiring certificate | `0` |
 | `MultiVCenter` | two vCenters on different versions, each with its own host; no snapshots anywhere | `0` |
 | `VlcmBaselines` | three hosts with vLCM patch baselines attached — one non-compliant, one compliant, one never scanned | `0` |
+| `DeadSwitch` | a second vSwitch whose every uplink has lost link | `2` |
 | `ConnectFail` | every `Connect-VIServer` throws | `1` |
 
 `Healthy` is also re-run under several argument sets (`-ExpectedEsxiBuild`,

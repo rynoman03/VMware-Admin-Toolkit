@@ -215,11 +215,20 @@ Two things this deliberately does **not** do:
   script compares the build it can already see instead.
 
 **Every report says which version produced it.** The console banner and the
-report header both carry the script version (`v1.4.0`). This script gets copied
+report header both carry the script version (`v1.4.1`). This script gets copied
 onto jump boxes and into scheduled tasks, and those copies go stale silently —
 without a stamp, a report full of findings that were already fixed is
 indistinguishable from a regression. If a result looks wrong, check the version
 in the header before anything else.
+
+**Findings name the thing you have to touch.** A `NicLinkState` `FAIL` reads
+`vSwitch1: vmnic4, vmnic5 with no link (0 of 2 uplink(s) up)` — the switch
+*and* every NIC that lost link, so the row is enough to walk to the patch
+panel with. It briefly printed only the switch and a count, which made the
+`FAIL` row less actionable than the `WARN` row underneath it. Each section also
+heads its first column with what it actually lists (`Host`, `VM`, `Cluster`)
+rather than `Object`, which is the CSV's column name and not a word anyone
+scans a page of hosts for.
 
 **What counts as a `FAIL`.** `FAIL` means *broken now* — a host down, a VM
 orphaned or inaccessible, a datastore below the critical threshold, a LUN with
