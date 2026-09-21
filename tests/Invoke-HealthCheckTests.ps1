@@ -707,6 +707,65 @@ try {
         (@($r.Rows | Where-Object { $_.Check -eq 'VMToolsBacklog' -and $_.Status -eq 'FAIL' }).Count -eq 0) `
         "got: $(($r.Rows | Where-Object { $_.Check -eq 'VMToolsBacklog' } | ForEach-Object { $_.Status }) -join ', ')"
 
+    # --- ToolsVibVersion ----------------------------------------------------
+    # The Tools package a host ships its VMs. Not in the vSphere API, so this
+    # is the one check that costs a round trip per host - which is why it is
+    # opt-in, and why the default run must not make those calls at all.
+    Write-Host "`nScenario: ToolsVibVersion (switch off)" -ForegroundColor Cyan
+    $r = Invoke-Scenario 'VlcmBaselines' -Label 'VibOff'
+    Assert-That 'no esxcli calls when the switch is not passed' `
+        (@($r.Calls | Where-Object { $_ -like 'Get-EsxCli*' }).Count -eq 0) `
+        "got: $($r.Calls -join ', ')"
+    Assert-That 'and no Tools package rows' `
+        (@($r.Rows | Where-Object { $_.Check -eq 'ToolsVibVersion' }).Count -eq 0)
+
+    Write-Host "`nScenario: ToolsVibVersion (switch on)" -ForegroundColor Cyan
+    $r = Invoke-Scenario 'VlcmBaselines' -Label 'VibOn' -ExtraArgs @('-IncludeToolsVibVersion')
+    # Exactly one esxcli call per host: the cost is already the objection to
+    # this check, so a second call per host would matter.
+    $esx = @($r.Calls | Where-Object { $_ -like 'Get-EsxCli*' })
+    Assert-That 'exactly one esxcli call per connected host' `
+        ($esx.Count -eq 3 -and (@($esx | Sort-Object -Unique).Count -eq 3)) `
+        "got: $($esx -join ', ')"
+    # Host objects come in one bulk call, not one per host.
+    Assert-That 'host objects are fetched in bulk, not per host' `
+        (@($r.Calls | Where-Object { $_ -like 'Get-VMHost:scoped:*' }).Count -eq 1) `
+        "got: $($r.Calls -join ', ')"
+
+    $behind = Get-ResultRow $r.Rows 'esx02.fixture.local' 'ToolsVibVersion'
+    Assert-That 'a host on an older Tools package is WARN' `
+        ($behind.Count -eq 1 -and $behind[0].Status -eq 'WARN') "got: $($behind.Status) - $($behind.Detail)"
+    Assert-That 'and names both versions so the gap is visible' `
+        ($behind.Count -eq 1 -and $behind[0].Detail -match '12\.3\.0' -and $behind[0].Detail -match '12\.4\.5') `
+        "got: $($behind.Detail)"
+    $level = Get-ResultRow $r.Rows 'esx01.fixture.local' 'ToolsVibVersion'
+    Assert-That 'a host on the newest package is NORMAL' `
+        ($level.Count -eq 1 -and $level[0].Status -eq 'NORMAL') "got: $($level.Status) - $($level.Detail)"
+    # esx03 is on build 9999999, which is numerically older than esx01's
+    # 23787635 but sorts after it as text. Compared as strings, esx03 would be
+    # crowned the newest and esx01 reported as behind it - the finding exactly
+    # inverted on the host that is actually current.
+    $trap = Get-ResultRow $r.Rows 'esx03.fixture.local' 'ToolsVibVersion'
+    Assert-That 'version builds compare as numbers, not as text' `
+        ($trap.Count -eq 1 -and $trap[0].Status -eq 'WARN' -and $trap[0].Detail -match '9999999 is older') `
+        "got: $($trap.Status) - $($trap.Detail)"
+    # Being behind the estate is a consistency finding, not an outage.
+    Assert-That 'the Tools package check never raises the failure exit code' `
+        (@($r.Rows | Where-Object { $_.Check -eq 'ToolsVibVersion' -and $_.Status -eq 'FAIL' }).Count -eq 0)
+
+    # esxcli needs the host reachable and the account privileged. Failing to
+    # ask is not evidence the host is behind.
+    Write-Host "`nScenario: ToolsVibUnreadable" -ForegroundColor Cyan
+    $r = Invoke-Scenario 'ToolsVibUnreadable' -ExtraArgs @('-IncludeToolsVibVersion')
+    $denied = @($r.Rows | Where-Object { $_.Check -eq 'ToolsVibVersion' })
+    Assert-That 'an esxcli failure is INFO, never a false "behind"' `
+        ($denied.Count -gt 0 -and @($denied | Where-Object { $_.Status -ne 'INFO' }).Count -eq 0) `
+        "got: $(($denied | ForEach-Object { $_.Status }) -join ', ')"
+    Assert-That 'and says why it could not be read' `
+        ($denied.Count -gt 0 -and $denied[0].Detail -match 'esxcli') "got: $($denied[0].Detail)"
+    Assert-That 'an unreadable Tools package does not fail the run' `
+        ($r.ExitCode -eq 0) "exit code was $($r.ExitCode)"
+
     # --- ConnectFail --------------------------------------------------------
     Write-Host "`nScenario: ConnectFail" -ForegroundColor Cyan
     $r = Invoke-Scenario 'ConnectFail'

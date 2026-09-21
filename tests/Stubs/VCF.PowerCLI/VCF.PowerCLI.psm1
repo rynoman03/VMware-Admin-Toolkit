@@ -653,9 +653,69 @@ function Get-Compliance {
     $out.ToArray()
 }
 
+# The Tools package ('tools-light' VIB) each host ships. Not in the vSphere
+# API at all - esxcli is the only place it is exposed - so this is the one
+# check that costs a call per host, and the stub is shaped to prove that the
+# script asks once per host and no more.
+$script:FixtureVibVersions = @{
+    'esx01.fixture.local' = '12.4.5-23787635'
+    'esx02.fixture.local' = '12.3.0-21234567'   # deliberately behind esx01
+    # Build 9999999 is NUMERICALLY older than 23787635 but sorts AFTER it as
+    # text. A string comparison would crown this host the newest in the estate
+    # and report the two that are actually current as behind it.
+    'esx03.fixture.local' = '12.4.5-9999999'
+}
+
+function Get-VMHost {
+    [CmdletBinding()]
+    param([string[]] $Id, $Server)
+    Write-FixtureCall $(if ($Id) { "Get-VMHost:scoped:$(@($Id).Count)" } else { 'Get-VMHost:all' })
+    $wanted = $null
+    if ($Id) { $wanted = @{}; foreach ($i in $Id) { $wanted["$i"] = $true } }
+    @(Get-FixtureHostView -Server $Server |
+        Where-Object { $null -eq $wanted -or $wanted.ContainsKey("$($_.MoRef)") } |
+        ForEach-Object {
+            [pscustomobject]@{
+                Name          = $_.Name
+                ExtensionData = [pscustomobject]@{ MoRef = $_.MoRef }
+            }
+        })
+}
+
+function Get-EsxCli {
+    [CmdletBinding()]
+    param($VMHost, [switch] $V2)
+    # Logged per host on purpose: this is the one per-host call in the script,
+    # and a test has to be able to see that it happens once each and only when
+    # the switch is passed.
+    Write-FixtureCall "Get-EsxCli:$($VMHost.Name)"
+    $name = "$($VMHost.Name)"
+    if ((Get-FixtureScenario) -eq 'ToolsVibUnreadable') { throw 'Permission to perform this operation was denied.' }
+    $version = $script:FixtureVibVersions[$name]
+    $rows = New-Object System.Collections.Generic.List[object]
+    if ($version) {
+        $rows.Add([pscustomobject]@{ Name = 'tools-light'; Version = $version })
+    }
+    # Real hosts carry hundreds of VIBs; the check has to pick its one out.
+    $rows.Add([pscustomobject]@{ Name = 'esx-base';   Version = '8.0.2-0.20.22380479' })
+    $rows.Add([pscustomobject]@{ Name = 'vsanhealth'; Version = '8.0.2-0.20.22380479' })
+    $listed = $rows.ToArray()
+    # Invoke must be a METHOD, not a property holding a scriptblock: PowerCLI's
+    # -V2 esxcli object is called as $esxcli.software.vib.list.Invoke(), and a
+    # stub that exposed it as a property would have let the script call it the
+    # wrong way and still pass.
+    $list = New-Object psobject
+    Add-Member -InputObject $list -MemberType ScriptMethod -Name Invoke -Value { $listed }.GetNewClosure()
+    [pscustomobject]@{
+        software = [pscustomobject]@{
+            vib = [pscustomobject]@{ list = $list }
+        }
+    }
+}
+
 $exported = @(
     'Set-PowerCLIConfiguration', 'Connect-VIServer', 'Disconnect-VIServer',
-    'Get-View', 'Get-VM', 'Get-Snapshot'
+    'Get-View', 'Get-VM', 'Get-Snapshot', 'Get-VMHost', 'Get-EsxCli'
 )
 if ((Get-FixtureScenario) -eq 'VlcmBaselines') { $exported += 'Get-Compliance' }
 Export-ModuleMember -Function $exported

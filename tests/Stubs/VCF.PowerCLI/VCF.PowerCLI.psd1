@@ -14,7 +14,8 @@
     # so a name missing here is simply not exported however the .psm1 asks.
     FunctionsToExport = @(
         'Set-PowerCLIConfiguration', 'Connect-VIServer', 'Disconnect-VIServer',
-        'Get-View', 'Get-VM', 'Get-Snapshot', 'Get-Compliance'
+        'Get-View', 'Get-VM', 'Get-Snapshot', 'Get-Compliance',
+        'Get-VMHost', 'Get-EsxCli'
     )
     CmdletsToExport   = @()
     VariablesToExport = @()
