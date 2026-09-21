@@ -344,7 +344,7 @@ param(
 # unanswerable - the script gets copied to jump boxes and scheduled tasks, and
 # those copies go stale silently. Bump this whenever a change alters what the
 # report says.
-$script:ScriptVersion = '1.4.2'
+$script:ScriptVersion = '1.5.0'
 
 $script:Results = New-Object System.Collections.Generic.List[object]
 $script:ShowAllRows = [bool]$ShowAllConsoleOutput
@@ -606,6 +606,7 @@ function Format-CheckLabel {
         'VersionVsVCenter' = 'Version vs vCenter'
         'VCenterBuild'     = 'vCenter Build'
         'EsxiPatchLevel'   = 'ESXi Patch Level'
+        'VMToolsBacklog'   = 'VM Tools Backlog'
     }
     if ($overrides.ContainsKey($Check)) { return $overrides[$Check] }
 
@@ -1731,6 +1732,67 @@ try {
             } else {
                 Add-Result 'Updates' $hName 'EsxiPatchLevel' 'WARN' "Build $hBuild is behind the expected build $ExpectedEsxiBuild - an update is available"
             }
+        }
+    }
+
+    # VMware Tools backlog, per host.
+    #
+    # Tools runs in the GUEST, not on the host - ESXi has no "Tools version"
+    # of its own to be behind. What a host does have is the Tools package it
+    # offers its VMs, and when that package is stale every VM on the host
+    # reports toolsOld at once. So the useful host-level question is not "does
+    # this host need Tools updated" but "is this host where the backlog
+    # lives", which the per-VM rows cannot answer on a page of 155 of them.
+    #
+    # Runtime.Host came with the VM views, so this is a regroup of data
+    # already in memory - no extra calls.
+    $toolsByHost = @{}
+    foreach ($vmEntry in $vmEntries) {
+        $vv = $vmEntry.View
+        if ([string]$vv.Runtime.PowerState -ne 'poweredOn') { continue }
+        if (-not $vv.Runtime.Host) { continue }
+        $hk = "$($vmEntry.VCenter)|$($vv.Runtime.Host)"
+        if (-not $toolsByHost.ContainsKey($hk)) {
+            $toolsByHost[$hk] = [pscustomobject]@{ Total = 0; Old = 0; NotRunning = 0; NotInstalled = 0 }
+        }
+        $t = $toolsByHost[$hk]
+        $t.Total++
+        switch ([string]$vv.Guest.ToolsStatus) {
+            'toolsOld'          { $t.Old++ }
+            'toolsNotRunning'   { $t.NotRunning++ }
+            'toolsNotInstalled' { $t.NotInstalled++ }
+        }
+    }
+
+    foreach ($entry in $hostEntries) {
+        $hv    = $entry.View
+        $hName = $hv.Name
+        if ([string]$hv.Runtime.ConnectionState -ne 'connected') { continue }
+        $t = $toolsByHost["$($entry.VCenter)|$($hv.MoRef)"]
+        if ($null -eq $t -or $t.Total -eq 0) {
+            Add-Result 'Updates' $hName 'VMToolsBacklog' 'INFO' 'No powered-on VMs on this host'
+            continue
+        }
+        $behind = $t.Old + $t.NotRunning + $t.NotInstalled
+        if ($behind -eq 0) {
+            Add-Result 'Updates' $hName 'VMToolsBacklog' 'NORMAL' "All $($t.Total) powered-on VM(s) report current, running VMware Tools"
+            continue
+        }
+        $parts = New-Object System.Collections.Generic.List[object]
+        if ($t.Old -gt 0)          { $parts.Add("$($t.Old) out of date") }
+        if ($t.NotRunning -gt 0)   { $parts.Add("$($t.NotRunning) installed but stopped") }
+        if ($t.NotInstalled -gt 0) { $parts.Add("$($t.NotInstalled) not installed") }
+        $summary = "$behind of $($t.Total) powered-on VM(s): $($parts -join ', ')"
+
+        # WARN only where updating the HOST is the fix. Out-of-date Tools on
+        # most of a host's VMs points at the Tools package the host itself
+        # ships; scattered ones are per-VM work that the VMCompliance rows
+        # already list, and repeating them here as findings would double-count
+        # the same backlog into the attention view twice.
+        if ($t.Old -gt 0 -and $t.Old -ge [math]::Ceiling($t.Total / 2.0)) {
+            Add-Result 'Updates' $hName 'VMToolsBacklog' 'WARN' "$summary - most of this host's VMs report out-of-date Tools, which usually means the host's own bundled Tools package is behind; patching the host updates them all"
+        } else {
+            Add-Result 'Updates' $hName 'VMToolsBacklog' 'INFO' "$summary - listed per VM under VM Compliance > VMware Tools"
         }
     }
     #endregion

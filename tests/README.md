@@ -34,6 +34,7 @@ check what a consumer of the report actually sees.
 | `VlcmBaselines` | three hosts with vLCM patch baselines attached — one non-compliant, one compliant, one never scanned | `0` |
 | `DeadSwitch` | a second vSwitch whose every uplink has lost link | `2` |
 | `UnresolvedUplink` | a switch whose uplink key has no matching physical NIC | `0` |
+| `StaleToolsBundle` | most of a host's powered-on VMs report out-of-date Tools | `0` |
 | `ConnectFail` | every `Connect-VIServer` throws | `1` |
 
 `Healthy` is also re-run under several argument sets (`-ExpectedEsxiBuild`,
