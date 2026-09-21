@@ -215,7 +215,7 @@ Two things this deliberately does **not** do:
   script compares the build it can already see instead.
 
 **Every report says which version produced it.** The console banner and the
-report header both carry the script version (`v1.4.2`). This script gets copied
+report header both carry the script version (`v1.5.0`). This script gets copied
 onto jump boxes and into scheduled tasks, and those copies go stale silently —
 without a stamp, a report full of findings that were already fixed is
 indistinguishable from a regression. If a result looks wrong, check the version
@@ -245,6 +245,23 @@ orphaned or inaccessible, a datastore below the critical threshold, a LUN with
 no active paths left, an expired certificate. `WARN` means *degraded or
 non-standard* — fix it in the normal course of work. The distinction only holds
 if it's applied consistently, so the report's critical count is worth reading.
+
+**Which hosts the Tools backlog sits on.** Tools runs in the *guest*, so an ESXi
+host has no Tools version of its own to be behind — but it does ship the package
+its VMs install from, and when that's stale every VM on the host reports
+`toolsOld` at once. The `Updates` section carries a **VM Tools Backlog** row per
+host: how many of its powered-on VMs are out of date, stopped, or missing Tools.
+`WARN` only where outdated Tools cover **half or more** of the host's VMs, since
+that points at the host's own bundle and patching the host fixes them all in one
+go. Scattered ones stay `INFO` — they're per-VM work, already listed under *VM
+Compliance › VMware Tools*, and repeating them as findings would double-count
+the same backlog into the attention view. Costs no extra API calls; it's a
+regroup of data the VM views already carry.
+
+Host-side: the exact Tools VIB version an ESXi host ships **isn't exposed by the
+vSphere API** — reading it needs `esxcli software vib list`, a per-host shell
+call this script deliberately doesn't make. The majority-outdated signal above is
+the reachable proxy for it.
 
 **VMware Tools** is `WARN`, including when Tools aren't installed at all. The VM
 is running fine; what's missing is manageability — graceful shutdown, quiesced

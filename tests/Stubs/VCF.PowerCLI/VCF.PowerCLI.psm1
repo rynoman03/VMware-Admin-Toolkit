@@ -396,6 +396,15 @@ function Get-FixtureVmView {
         $vms += $ghost
     }
 
+    if ((Get-FixtureScenario) -eq 'StaleToolsBundle') {
+        # Most of this host's powered-on VMs report out-of-date Tools, which
+        # is the signature of the host's own bundled Tools package being
+        # behind - one host to patch instead of N VMs to chase.
+        foreach ($n in 1..4) {
+            $vms += New-FixtureVmView -Name "stale0$n" -MoRef "VirtualMachine-vm-4$n" -ToolsStatus 'toolsOld'
+        }
+    }
+
     if ((Get-FixtureScenario) -eq 'Degraded') {
         # VMware Tools states. 'not installed' is the single most common
         # finding on a real estate, so its severity decides whether the

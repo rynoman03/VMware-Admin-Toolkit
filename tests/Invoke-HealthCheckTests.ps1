@@ -682,6 +682,31 @@ try {
         ($nonComp.Count -eq 1 -and $nonComp[0].Detail -notmatch 'expected build') `
         "got: $($nonComp.Detail)"
 
+    # --- StaleToolsBundle ---------------------------------------------------
+    # VMware Tools runs in the guest, so a host has no Tools version of its
+    # own to be behind - but it does ship the package its VMs install from,
+    # and when that is stale every VM on the host reports toolsOld at once.
+    # The per-VM rows cannot show that pattern on a page of 155 of them.
+    Write-Host "`nScenario: StaleToolsBundle" -ForegroundColor Cyan
+    $r = Invoke-Scenario 'StaleToolsBundle'
+    $bk = Get-ResultRow $r.Rows 'esx01.fixture.local' 'VMToolsBacklog'
+    Assert-That 'a host whose VMs are mostly on old Tools is WARN' `
+        ($bk.Count -eq 1 -and $bk[0].Status -eq 'WARN') "got: $($bk.Status) - $($bk.Detail)"
+    Assert-That 'and points at the host bundle as the fix, not the VMs' `
+        ($bk.Count -eq 1 -and $bk[0].Detail -match 'bundled Tools package') "got: $($bk.Detail)"
+    Assert-That 'and counts them' `
+        ($bk.Count -eq 1 -and $bk[0].Detail -match '4 of 6') "got: $($bk.Detail)"
+    # A host carrying no powered-on VMs must not read as a clean Tools estate.
+    $idle = Get-ResultRow $r.Rows 'esx02.fixture.local' 'VMToolsBacklog'
+    Assert-That 'a host with no powered-on VMs says so rather than NORMAL' `
+        ($idle.Count -eq 1 -and $idle[0].Status -eq 'INFO' -and $idle[0].Detail -match 'No powered-on VMs') `
+        "got: $($idle.Status) - $($idle.Detail)"
+    # Scattered Tools work is per-VM and already listed; repeating it here as
+    # a finding would double-count the same backlog into the attention view.
+    Assert-That 'the host rollup never raises the failure exit code' `
+        (@($r.Rows | Where-Object { $_.Check -eq 'VMToolsBacklog' -and $_.Status -eq 'FAIL' }).Count -eq 0) `
+        "got: $(($r.Rows | Where-Object { $_.Check -eq 'VMToolsBacklog' } | ForEach-Object { $_.Status }) -join ', ')"
+
     # --- ConnectFail --------------------------------------------------------
     Write-Host "`nScenario: ConnectFail" -ForegroundColor Cyan
     $r = Invoke-Scenario 'ConnectFail'
