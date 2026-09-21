@@ -115,19 +115,51 @@ disagrees is what these parameters exist to surface. Then pass it:
 Quote a syslog value, since it contains `://`; NTP servers need no quotes.
 Comma-separate to pass several.
 
-**Always checking the same environment?** Give the parameters a default in the
-`param()` block instead of typing them every run:
+### Always checking the same environment? Use a wrapper
+
+Rather than retyping the baselines every run — or editing them into the
+`param()` block — keep a small wrapper beside the script. Everything
+site-specific lives in the wrapper; the health check itself stays untouched.
 
 ```powershell
-[string[]] $ExpectedSyslogServer = 'udp://loghost01.corp.local:514',
-[string[]] $ExpectedNtpServer    = @('10.10.0.10','10.10.0.11'),
+# Run-SiteHealthCheck.ps1 — this site's settings. Yours to edit.
+& "$PSScriptRoot\Invoke-VMwareHealthCheck.ps1" `
+    -VCenter              vcenter01.corp.local `
+    -ExpectedSyslogServer 'udp://loghost01.corp.local:514' `
+    -ExpectedNtpServer    10.10.0.10, 10.10.0.11 `
+    -ExpectedEsxiBuild    24859861 `
+    -ReportPath           C:\Reports `
+    @args
+exit $LASTEXITCODE
 ```
 
-Two things change if you do: the checks stop being opt-in, so a run against a
-*different* vCenter with its own collector will `WARN` on every host; and
-switching the comparison off for a single run then means passing an empty array
-(`-ExpectedSyslogServer @()`). If you point this at more than one environment,
-leaving the defaults empty and passing the value per run stays cleaner.
+```powershell
+.\HealthCheck\Run-SiteHealthCheck.ps1                        # normal run
+.\HealthCheck\Run-SiteHealthCheck.ps1 -ShowAllConsoleOutput   # extra args pass through
+```
+
+Two details make it work as a drop-in:
+
+- **`@args`** forwards anything else you type straight to the health check, so
+  the wrapper never has to be updated when a parameter is added.
+- **`exit $LASTEXITCODE`** preserves the exit codes below, so a scheduled task
+  or monitoring job still sees `2` when something FAILs. Without it the wrapper
+  always exits `0` and a failing run looks clean.
+
+**Why not just set a default in `param()`?** Because this file gets updated.
+Local edits to it turn every `git pull` into a merge, and a half-applied merge
+leaves a script that no longer parses — a stray comma in `param()` is a syntax
+error pointing at a line that has nothing to do with what you changed. The
+wrapper is a file upstream never touches, so pulls stay clean forever.
+
+One `Get-Credential` prompt per run is the remaining friction. For an unattended
+scheduled task, read a saved credential inside the wrapper and pass
+`-Credential`; nothing about the health check itself needs to change.
+
+If you do edit `param()` anyway, two things change: the checks stop being
+opt-in, so a run against a *different* vCenter with its own collector will
+`WARN` on every host; and switching the comparison off for a single run then
+means passing an empty array (`-ExpectedSyslogServer @()`).
 
 Matching is forgiving about spelling, so you don't get false failures from
 equivalent notations: a `udp://` / `tcp://` / `ssl://` scheme prefix is ignored,
@@ -215,7 +247,7 @@ Two things this deliberately does **not** do:
   script compares the build it can already see instead.
 
 **Every report says which version produced it.** The console banner and the
-report header both carry the script version (`v1.5.0`). This script gets copied
+report header both carry the script version (`v1.5.1`). This script gets copied
 onto jump boxes and into scheduled tasks, and those copies go stale silently —
 without a stamp, a report full of findings that were already fixed is
 indistinguishable from a regression. If a result looks wrong, check the version
