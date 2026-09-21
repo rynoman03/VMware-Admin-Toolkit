@@ -344,7 +344,7 @@ param(
 # unanswerable - the script gets copied to jump boxes and scheduled tasks, and
 # those copies go stale silently. Bump this whenever a change alters what the
 # report says.
-$script:ScriptVersion = '1.4.1'
+$script:ScriptVersion = '1.4.2'
 
 $script:Results = New-Object System.Collections.Generic.List[object]
 $script:ShowAllRows = [bool]$ShowAllConsoleOutput
@@ -1039,14 +1039,28 @@ try {
             $downUplinks   = New-Object System.Collections.Generic.List[object]
             $deadSwitches  = New-Object System.Collections.Generic.List[object]
             $thinSwitches  = New-Object System.Collections.Generic.List[object]
+            $unreadable    = New-Object System.Collections.Generic.List[object]
             foreach ($sw in $switches) {
-                if (@($sw.Keys).Count -eq 0) { continue }
+                $swKeys = @($sw.Keys)
+                if ($swKeys.Count -eq 0) { continue }
                 $up   = 0
                 $dead = New-Object System.Collections.Generic.List[object]
-                foreach ($k in $sw.Keys) {
+                $unresolved = 0
+                foreach ($k in $swKeys) {
                     $pnic = $pnicByKey[[string]$k]
-                    if ($null -eq $pnic) { continue }
+                    # An uplink key with no matching entry in Config.Network.Pnic
+                    # tells us NOTHING about that uplink's link state. Skipping
+                    # it silently left $up at 0, which the test below then read
+                    # as "every uplink is down" - a hard FAIL, with no NIC names
+                    # in it because none had been resolved to name. That is the
+                    # difference between a switch that is down and a switch we
+                    # could not read, and they are not the same finding.
+                    if ($null -eq $pnic) { $unresolved++; continue }
                     if ($null -eq $pnic.LinkSpeed) { $dead.Add("$($pnic.Device)") } else { $up++ }
+                }
+                if ($up -eq 0 -and $dead.Count -eq 0) {
+                    $unreadable.Add("$($sw.Name) ($unresolved of $($swKeys.Count) uplink(s) not reported by vCenter)")
+                    continue
                 }
                 if ($up -eq 0) {
                     # Name the NICs here too. These were collected and then
@@ -1065,13 +1079,18 @@ try {
                 }
             }
 
+            # Never let an unreadable switch hide inside an all-clear: the note
+            # rides along with whatever verdict the readable switches produced.
+            $unread = if ($unreadable.Count -gt 0) { " Uplink state could not be read for: $($unreadable -join ', ')." } else { '' }
             if ($switches.Count -eq 0) {
                 Add-Result 'HostHealth' $hName 'NicLinkState' 'INFO' 'No virtual switches reported for this host'
             } elseif ($deadSwitches.Count -gt 0) {
                 $also = if ($downUplinks.Count -gt 0) { " Also down elsewhere: $($downUplinks -join ', ')." } else { '' }
-                Add-Result 'HostHealth' $hName 'NicLinkState' 'FAIL' "Switch(es) with no uplink carrying link: $($deadSwitches -join ', ') - that traffic is down; check the cables and physical switch ports.$also"
+                Add-Result 'HostHealth' $hName 'NicLinkState' 'FAIL' "Switch(es) with no uplink carrying link: $($deadSwitches -join ', ') - that traffic is down; check the cables and physical switch ports.$also$unread"
             } elseif ($downUplinks.Count -gt 0) {
-                Add-Result 'HostHealth' $hName 'NicLinkState' 'WARN' "Uplink(s) with no link: $($downUplinks -join ', ') - still carrying traffic on the remaining uplink(s); check the cable and the physical switch port"
+                Add-Result 'HostHealth' $hName 'NicLinkState' 'WARN' "Uplink(s) with no link: $($downUplinks -join ', ') - still carrying traffic on the remaining uplink(s); check the cable and the physical switch port.$unread"
+            } elseif ($unreadable.Count -gt 0) {
+                Add-Result 'HostHealth' $hName 'NicLinkState' 'INFO' "Uplink state could not be read for: $($unreadable -join ', ') - vCenter listed the switch's uplinks but reported no matching physical NIC, so this host's link state is unknown rather than healthy"
             } else {
                 Add-Result 'HostHealth' $hName 'NicLinkState' 'NORMAL' "All assigned uplinks have link across $($switches.Count) switch(es)"
             }
@@ -1080,7 +1099,11 @@ try {
             # takes the host's traffic down with it.
             if ($switches.Count -gt 0) {
                 if ($thinSwitches.Count -gt 0) {
-                    Add-Result 'HostHealth' $hName 'UplinkRedundancy' 'WARN' "No uplink redundancy on: $($thinSwitches -join ', ') - a single cable, NIC or switch port failure takes this traffic down"
+                    Add-Result 'HostHealth' $hName 'UplinkRedundancy' 'WARN' "No uplink redundancy on: $($thinSwitches -join ', ') - a single cable, NIC or switch port failure takes this traffic down.$unread"
+                } elseif ($unreadable.Count -gt 0) {
+                    # "Every switch" would be a claim about switches that were
+                    # never read.
+                    Add-Result 'HostHealth' $hName 'UplinkRedundancy' 'INFO' "Redundancy could not be assessed for: $($unreadable -join ', ')"
                 } else {
                     Add-Result 'HostHealth' $hName 'UplinkRedundancy' 'NORMAL' "Every switch has at least two uplinks with link"
                 }

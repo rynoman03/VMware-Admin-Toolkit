@@ -255,7 +255,15 @@ function New-FixtureHostView {
                     [pscustomobject]@{ Name = 'vSwitch1'; Pnic = @(
                         'key-vim.host.PhysicalNic-vmnic4', 'key-vim.host.PhysicalNic-vmnic5') }
                 )
-                ProxySwitch = @()
+                # UnresolvedUplink: a switch whose single uplink key has no
+                # matching entry in Pnic above. Nothing is known about that
+                # uplink's link state - which is NOT the same as knowing it is
+                # down, though the check used to report it as exactly that,
+                # with a detail reading "0 of 1 uplink(s) up" and no NIC named
+                # because none had been resolved to name.
+                ProxySwitch = if ((Get-FixtureScenario) -eq 'UnresolvedUplink') {
+                    @( [pscustomobject]@{ DvsName = 'DSwitch-Prod'; Pnic = @('key-vim.host.PhysicalNic-vmnic99') } )
+                } else { @() }
                 DnsConfig   = [pscustomobject]@{ Address = @('10.10.0.5', '10.10.0.6') }
             }
         }
