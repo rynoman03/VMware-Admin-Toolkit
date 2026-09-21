@@ -585,6 +585,30 @@ try {
         ($htmlText -match '<table data-section-table="sec-VMCompliance[^"]*"><tr><th>VM</th>') `
         'no VM section table headed "VM"'
 
+    # --- UnresolvedUplink ---------------------------------------------------
+    # A switch whose uplink key has no matching physical NIC in
+    # Config.Network.Pnic. The uplink was skipped silently, which left the
+    # "any uplink up?" counter at zero - and that was read as "every uplink is
+    # down" and reported FAIL. The giveaway in production was a FAIL detail
+    # reading "0 of 1 uplink(s) up" with no NIC named in it: nothing had been
+    # resolved, so there was nothing to name.
+    Write-Host "`nScenario: UnresolvedUplink" -ForegroundColor Cyan
+    $r = Invoke-Scenario 'UnresolvedUplink'
+    $nic = Get-ResultRow $r.Rows 'esx01.fixture.local' 'NicLinkState'
+    Assert-That 'an unreadable uplink is not reported as a dead switch' `
+        ($nic.Count -eq 1 -and $nic[0].Status -ne 'FAIL') "got: $($nic.Status) - $($nic.Detail)"
+    Assert-That 'and the row says the state is unknown, not healthy' `
+        ($nic.Count -eq 1 -and $nic[0].Detail -match 'could not be read') "got: $($nic.Detail)"
+    Assert-That 'and names the switch it could not read' `
+        ($nic.Count -eq 1 -and $nic[0].Detail -match 'DSwitch-Prod') "got: $($nic.Detail)"
+    # The readable switch on the same host is healthy, so the run must not
+    # fail - but the unreadable one must not be swallowed by that all-clear.
+    Assert-That 'an unreadable uplink alone does not fail the run' `
+        ($r.ExitCode -eq 0) "exit code was $($r.ExitCode)"
+    $red = Get-ResultRow $r.Rows 'esx01.fixture.local' 'UplinkRedundancy'
+    Assert-That 'redundancy is not claimed for a switch that was never read' `
+        ($red.Count -eq 1 -and $red[0].Detail -notmatch 'Every switch') "got: $($red.Status) - $($red.Detail)"
+
     # --- Updates ------------------------------------------------------------
     # "Is an update available" has no single source of truth in the vSphere
     # API, so the section has to be explicit about which source produced each
