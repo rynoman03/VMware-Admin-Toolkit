@@ -358,7 +358,7 @@ param(
 # unanswerable - the script gets copied to jump boxes and scheduled tasks, and
 # those copies go stale silently. Bump this whenever a change alters what the
 # report says.
-$script:ScriptVersion = '1.5.1'
+$script:ScriptVersion = '1.5.2'
 
 $script:Results = New-Object System.Collections.Generic.List[object]
 $script:ShowAllRows = [bool]$ShowAllConsoleOutput
@@ -601,6 +601,80 @@ function Format-LunList {
 # categories whose rows are all one kind of thing get a specific name;
 # Capacity (datastores and clusters) and Updates (vCenter and hosts) stay
 # generic rather than mislabel half their rows.
+# Classifies a VM's VMware Tools state from the guest info.
+#
+# Guest.ToolsStatus is DEPRECATED and conflates "is it installed" with "is it
+# running": VMware documents toolsNotInstalled as "has never been installed OR
+# HAS NOT RUN in the virtual machine". So a VM with Tools genuinely installed,
+# whose service happens to be stopped or has not reported since boot, comes
+# back as toolsNotInstalled - the report says "not installed" while the guest
+# OS plainly shows it installed.
+#
+# The modern properties separate the two, and add the case the old one cannot
+# express at all: guestToolsUnmanaged, which is open-vm-tools installed from
+# the distribution and managed by the guest OS. That is the normal, correct
+# arrangement on current Linux, and it is not a finding.
+#
+# Returns Installed / Running / Currency / Version / Source. Source records
+# which property answered, so a row can say where its verdict came from.
+function Get-ToolsState {
+    param([object] $GuestInfo)
+
+    $verStatus = [string]$GuestInfo.ToolsVersionStatus2
+    $runStatus = [string]$GuestInfo.ToolsRunningStatus
+    $version   = [string]$GuestInfo.ToolsVersion
+    $legacy    = [string]$GuestInfo.ToolsStatus
+
+    $installed = $null
+    $currency  = 'unknown'
+    $source    = 'ToolsVersionStatus2'
+
+    if (-not [string]::IsNullOrWhiteSpace($verStatus)) {
+        $installed = ($verStatus -ne 'guestToolsNotInstalled')
+        switch ($verStatus) {
+            'guestToolsCurrent'       { $currency = 'current' }
+            'guestToolsUnmanaged'     { $currency = 'unmanaged' }   # open-vm-tools
+            'guestToolsSupportedNew'  { $currency = 'current' }
+            'guestToolsNeedUpgrade'   { $currency = 'old' }
+            'guestToolsSupportedOld'  { $currency = 'old' }
+            'guestToolsTooOld'        { $currency = 'old' }
+            'guestToolsBlacklisted'   { $currency = 'old' }
+            'guestToolsNotInstalled'  { $currency = 'none' }
+        }
+    } elseif (-not [string]::IsNullOrWhiteSpace($version) -and $version -ne '0') {
+        # A reported version is itself proof of installation, whatever the
+        # deprecated status says.
+        $installed = $true
+        $source    = 'ToolsVersion'
+    } elseif (-not [string]::IsNullOrWhiteSpace($legacy)) {
+        $source = 'ToolsStatus (deprecated)'
+        $installed = ($legacy -ne 'toolsNotInstalled')
+        switch ($legacy) {
+            'toolsOk'  { $currency = 'current' }
+            'toolsOld' { $currency = 'old' }
+        }
+    }
+
+    # Running is only knowable from ToolsRunningStatus; the legacy property's
+    # toolsNotRunning is the one case it did state plainly.
+    $running = $null
+    if (-not [string]::IsNullOrWhiteSpace($runStatus)) {
+        $running = ($runStatus -eq 'guestToolsRunning' -or $runStatus -eq 'guestToolsExecutingScripts')
+    } elseif ($legacy -eq 'toolsNotRunning') {
+        $running = $false
+    } elseif ($legacy -eq 'toolsOk' -or $legacy -eq 'toolsOld') {
+        $running = $true
+    }
+
+    [pscustomobject]@{
+        Installed = $installed
+        Running   = $running
+        Currency  = $currency
+        Version   = $version
+        Source    = $source
+    }
+}
+
 function Format-ObjectColumnLabel {
     param([string] $Category)
     switch ($Category) {
@@ -1249,7 +1323,11 @@ try {
         'Name', 'Runtime.ConnectionState', 'Runtime.ConsolidationNeeded',
         'Runtime.PowerState', 'Runtime.Host',
         'Config.Version', 'Config.GuestFullName', 'Config.Hardware.Device',
-        'Guest.ToolsStatus', 'Guest.Disk', 'Snapshot'
+        # ToolsStatus is deprecated and conflates two different questions -
+        # see Get-ToolsState. The three properties after it are the ones that
+        # answer them separately.
+        'Guest.ToolsStatus', 'Guest.ToolsVersionStatus2', 'Guest.ToolsRunningStatus',
+        'Guest.ToolsVersion', 'Guest.Disk', 'Snapshot'
     )
     # Each view is kept with the connection it came from, the same way
     # $hostEntries does. A MoRef like 'VirtualMachine-vm-101' is only unique
@@ -1362,11 +1440,12 @@ try {
 
         # VMware Tools status (only meaningful when powered on)
         if ($powerState -eq 'poweredOn') {
-            $toolsStatus = [string]$vv.Guest.ToolsStatus
-            switch ($toolsStatus) {
-                'toolsOk'          { Add-Result 'VMCompliance' $vmName 'VMwareTools' 'NORMAL' 'toolsOk' }
-                'toolsOld'         { Add-Result 'VMCompliance' $vmName 'VMwareTools' 'WARN' 'Tools out of date' }
-                'toolsNotRunning'  { Add-Result 'VMCompliance' $vmName 'VMwareTools' 'WARN' 'Tools installed but not running - no graceful shutdown, no quiesced backup, and no guest IP or disk data in this report' }
+            $ts     = Get-ToolsState -GuestInfo $vv.Guest
+            $verTxt = if (-not [string]::IsNullOrWhiteSpace($ts.Version) -and $ts.Version -ne '0') { " (build $($ts.Version))" } else { '' }
+
+            if ($null -eq $ts.Installed) {
+                Add-Result 'VMCompliance' $vmName 'VMwareTools' 'INFO' 'VMware Tools state not reported by vCenter for this VM'
+            } elseif (-not $ts.Installed) {
                 # WARN, not FAIL. A VM with no Tools is running fine - what is
                 # missing is manageability: graceful shutdown, quiesced
                 # backups, heartbeat, and the guest disk figures this report
@@ -1375,8 +1454,24 @@ try {
                 # VM or a fully offline LUN. On a real estate it is also one of
                 # the most common findings there is, so as a FAIL it buried
                 # every genuine failure underneath it.
-                'toolsNotInstalled'{ Add-Result 'VMCompliance' $vmName 'VMwareTools' 'WARN' 'VMware Tools not installed - the VM runs, but it cannot be shut down gracefully, backed up with a quiesced snapshot, or report its guest IP and disk usage' }
-                default            { Add-Result 'VMCompliance' $vmName 'VMwareTools' 'INFO' "$toolsStatus" }
+                Add-Result 'VMCompliance' $vmName 'VMwareTools' 'WARN' 'VMware Tools not installed - the VM runs, but it cannot be shut down gracefully, backed up with a quiesced snapshot, or report its guest IP and disk usage'
+            } elseif ($false -eq $ts.Running) {
+                # Installed, service stopped. The deprecated ToolsStatus called
+                # this "not installed", which is what made the report disagree
+                # with the guest OS.
+                Add-Result 'VMCompliance' $vmName 'VMwareTools' 'WARN' "VMware Tools is installed$verTxt but not running - no graceful shutdown, no quiesced backup, and no guest IP or disk data in this report"
+            } elseif ($ts.Currency -eq 'unmanaged') {
+                # open-vm-tools from the distribution, updated by the guest OS
+                # package manager. The normal, correct arrangement on current
+                # Linux - vCenter cannot judge its currency and neither can
+                # this script, so calling it out of date would be wrong.
+                Add-Result 'VMCompliance' $vmName 'VMwareTools' 'NORMAL' "open-vm-tools installed and running$verTxt, managed by the guest OS - vCenter does not track its version, and the guest's own package manager keeps it current"
+            } elseif ($ts.Currency -eq 'old') {
+                Add-Result 'VMCompliance' $vmName 'VMwareTools' 'WARN' "VMware Tools is out of date$verTxt"
+            } elseif ($ts.Currency -eq 'current') {
+                Add-Result 'VMCompliance' $vmName 'VMwareTools' 'NORMAL' "VMware Tools installed and running$verTxt"
+            } else {
+                Add-Result 'VMCompliance' $vmName 'VMwareTools' 'INFO' "VMware Tools is installed and running$verTxt; vCenter did not report whether it is current (read from $($ts.Source))"
             }
 
             # Guest disk free space. Reported as a PERCENTAGE of each volume
@@ -1771,11 +1866,12 @@ try {
         }
         $t = $toolsByHost[$hk]
         $t.Total++
-        switch ([string]$vv.Guest.ToolsStatus) {
-            'toolsOld'          { $t.Old++ }
-            'toolsNotRunning'   { $t.NotRunning++ }
-            'toolsNotInstalled' { $t.NotInstalled++ }
-        }
+        # Same classifier as the per-VM rows above: two sections disagreeing
+        # about the same VM is worse than either being wrong on its own.
+        $st = Get-ToolsState -GuestInfo $vv.Guest
+        if ($false -eq $st.Installed)    { $t.NotInstalled++ }
+        elseif ($false -eq $st.Running)  { $t.NotRunning++ }
+        elseif ($st.Currency -eq 'old')  { $t.Old++ }
     }
 
     foreach ($entry in $hostEntries) {

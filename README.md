@@ -247,7 +247,7 @@ Two things this deliberately does **not** do:
   script compares the build it can already see instead.
 
 **Every report says which version produced it.** The console banner and the
-report header both carry the script version (`v1.5.1`). This script gets copied
+report header both carry the script version (`v1.5.2`). This script gets copied
 onto jump boxes and into scheduled tasks, and those copies go stale silently —
 without a stamp, a report full of findings that were already fixed is
 indistinguishable from a regression. If a result looks wrong, check the version
@@ -294,6 +294,28 @@ Host-side: the exact Tools VIB version an ESXi host ships **isn't exposed by the
 vSphere API** — reading it needs `esxcli software vib list`, a per-host shell
 call this script deliberately doesn't make. The majority-outdated signal above is
 the reachable proxy for it.
+
+**How Tools state is read.** `Guest.ToolsStatus` is deprecated and conflates two
+different questions — VMware documents `toolsNotInstalled` as *"has never been
+installed **or has not run** in the virtual machine"*. A VM whose Tools service
+is simply stopped therefore came back as **not installed**, and the report
+contradicted what the guest OS plainly showed.
+
+The check now reads `ToolsVersionStatus2`, `ToolsRunningStatus` and
+`ToolsVersion`, which answer those questions separately, and falls back to the
+deprecated property only when a vCenter doesn't populate them. Two consequences:
+
+- **Installed but stopped** says so, and carries the build the guest reported
+  (`VMware Tools is installed (build 12389) but not running`) — the build is the
+  evidence, so you can check the claim against the guest.
+- **open-vm-tools** (`guestToolsUnmanaged`) is `NORMAL`, not a finding. That's
+  the distribution package, updated by the guest's own package manager, and is
+  the correct arrangement on current Linux. vCenter doesn't track its currency,
+  so calling it out of date would be inventing a finding — and on a Linux-heavy
+  estate that's a large, permanent, wrong number.
+
+The per-host **VM Tools Backlog** rollup uses the same classifier, so the two
+sections can't disagree about the same VM.
 
 **VMware Tools** is `WARN`, including when Tools aren't installed at all. The VM
 is running fine; what's missing is manageability — graceful shutdown, quiesced
