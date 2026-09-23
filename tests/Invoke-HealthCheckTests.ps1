@@ -508,6 +508,51 @@ try {
         (@($r.Rows | Where-Object { $_.Check -eq 'VMwareTools' -and $_.Status -eq 'FAIL' }).Count -eq 0) `
         "got: $(($r.Rows | Where-Object { $_.Check -eq 'VMwareTools' } | ForEach-Object { $_.Status }) -join ', ')"
 
+    # Guest.ToolsStatus is deprecated and conflates "is it installed" with
+    # "is it running": VMware documents toolsNotInstalled as "has never been
+    # installed OR HAS NOT RUN". A VM whose Tools service is simply stopped
+    # therefore came back as not installed, and the report contradicted what
+    # the guest OS plainly showed.
+    $stopped = Get-ResultRow $r.Rows 'toolsstopped01' 'VMwareTools'
+    Assert-That 'Tools installed but stopped is not reported as not installed' `
+        ($stopped.Count -eq 1 -and $stopped[0].Detail -notmatch 'not installed') `
+        "got: $($stopped.Status) - $($stopped.Detail)"
+    Assert-That 'and it says installed-but-not-running instead' `
+        ($stopped.Count -eq 1 -and $stopped[0].Status -eq 'WARN' -and $stopped[0].Detail -match 'installed.*but not running') `
+        "got: $($stopped.Status) - $($stopped.Detail)"
+    # The reported build is the evidence that it IS installed, so it belongs
+    # in the row - it is what lets someone check the claim against the guest.
+    Assert-That 'and carries the build the guest reported' `
+        ($stopped.Count -eq 1 -and $stopped[0].Detail -match '12389') "got: $($stopped.Detail)"
+
+    # open-vm-tools from the distribution, updated by the guest's own package
+    # manager. Standard on current Linux. vCenter does not track its currency,
+    # so reporting it as out of date would be inventing a finding.
+    $ovt = Get-ResultRow $r.Rows 'openvmtools01' 'VMwareTools'
+    Assert-That 'open-vm-tools managed by the guest OS is NORMAL, not a finding' `
+        ($ovt.Count -eq 1 -and $ovt[0].Status -eq 'NORMAL') "got: $($ovt.Status) - $($ovt.Detail)"
+    Assert-That 'and says who manages it' `
+        ($ovt.Count -eq 1 -and $ovt[0].Detail -match 'managed by the guest OS') "got: $($ovt.Detail)"
+
+    # The fix must not swing the other way: a VM with genuinely no Tools, where
+    # the modern property agrees, is still WARN.
+    $none = Get-ResultRow $r.Rows 'reallynotools01' 'VMwareTools'
+    Assert-That 'a VM with genuinely no Tools is still WARN' `
+        ($none.Count -eq 1 -and $none[0].Status -eq 'WARN' -and $none[0].Detail -match 'not installed') `
+        "got: $($none.Status) - $($none.Detail)"
+
+    # The per-host rollup has to classify identically, or the Updates section
+    # and the VM Compliance section contradict each other about the same VM.
+    $bk = Get-ResultRow $r.Rows 'esx01.fixture.local' 'VMToolsBacklog'
+    Assert-That 'the host rollup counts the stopped VM as stopped, not missing' `
+        ($bk.Count -eq 1 -and $bk[0].Detail -match '2 installed but stopped') `
+        "got: $($bk.Detail)"
+    # 9 powered-on VMs on this host, 5 behind: 1 out of date, 2 stopped, 2
+    # missing. open-vm-tools is the ninth and is deliberately not among them -
+    # counting it would make this 6 and put a managed guest in the backlog.
+    Assert-That 'and does not count open-vm-tools against the host' `
+        ($bk.Count -eq 1 -and $bk[0].Detail -match '5 of 9') "got: $($bk.Detail)"
+
     # A host whose connection state vCenter never reported. '' is not
     # 'connected', so a bare -ne test called a running host FAIL and printed
     # "State is  -" with a hole in it. The VM-side check was fixed for exactly

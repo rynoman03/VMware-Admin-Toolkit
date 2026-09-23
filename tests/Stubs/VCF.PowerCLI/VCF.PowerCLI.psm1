@@ -286,6 +286,9 @@ function New-FixtureVmView {
         [string] $HardwareVersion = 'vmx-19',
         [object] $Snapshot = $null,
         [string] $ToolsStatus = 'toolsOk',
+        [string] $ToolsVersionStatus2,
+        [string] $ToolsRunningStatus,
+        [string] $ToolsVersion,
         [switch] $NoUpdateableRuntime
     )
     $runtime = [pscustomobject]@{
@@ -308,7 +311,13 @@ function New-FixtureVmView {
             ) }
         }
         Guest   = [pscustomobject]@{
-            ToolsStatus = $ToolsStatus
+            # ToolsStatus is the deprecated property. The three beside it are
+            # what a current vCenter actually populates; leaving them empty in
+            # a fixture exercises the legacy fallback path instead.
+            ToolsStatus         = $ToolsStatus
+            ToolsVersionStatus2 = $ToolsVersionStatus2
+            ToolsRunningStatus  = $ToolsRunningStatus
+            ToolsVersion        = $ToolsVersion
             Disk        = @([pscustomobject]@{ DiskPath = 'C:\'; FreeSpace = 64GB; Capacity = 120GB })
         }
         Snapshot = $Snapshot
@@ -412,6 +421,30 @@ function Get-FixtureVmView {
         $vms += New-FixtureVmView -Name 'notools01' -MoRef 'VirtualMachine-vm-301' -ToolsStatus 'toolsNotInstalled'
         $vms += New-FixtureVmView -Name 'toolsoff01' -MoRef 'VirtualMachine-vm-302' -ToolsStatus 'toolsNotRunning'
         $vms += New-FixtureVmView -Name 'toolsold01' -MoRef 'VirtualMachine-vm-303' -ToolsStatus 'toolsOld'
+
+        # The reported case: the guest OS plainly has Tools installed, but the
+        # deprecated ToolsStatus says toolsNotInstalled because the service is
+        # not currently running. VMware documents that value as "has never
+        # been installed OR HAS NOT RUN", so the old property cannot tell the
+        # two apart - and the report contradicted the guest.
+        $vms += New-FixtureVmView -Name 'toolsstopped01' -MoRef 'VirtualMachine-vm-304' `
+            -ToolsStatus 'toolsNotInstalled' `
+            -ToolsVersionStatus2 'guestToolsCurrent' -ToolsRunningStatus 'guestToolsNotRunning' `
+            -ToolsVersion '12389'
+
+        # open-vm-tools from the distribution, managed by the guest OS package
+        # manager. Standard on current Linux. vCenter cannot judge its
+        # currency, so calling it out of date would be wrong.
+        $vms += New-FixtureVmView -Name 'openvmtools01' -MoRef 'VirtualMachine-vm-305' `
+            -ToolsStatus 'toolsOk' `
+            -ToolsVersionStatus2 'guestToolsUnmanaged' -ToolsRunningStatus 'guestToolsRunning' `
+            -ToolsVersion '12352'
+
+        # Genuinely absent: no version, and the modern property agrees.
+        $vms += New-FixtureVmView -Name 'reallynotools01' -MoRef 'VirtualMachine-vm-306' `
+            -ToolsStatus 'toolsNotInstalled' `
+            -ToolsVersionStatus2 'guestToolsNotInstalled' -ToolsRunningStatus 'guestToolsNotRunning' `
+            -ToolsVersion '0'
     }
 
     # A VM carrying a nested snapshot tree: an old root with a recent child.
